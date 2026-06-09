@@ -211,6 +211,7 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
   });
   async function poll() {
+    if (document.hidden) return;  // don't poll while the window is hidden/minimized (desktop perf)
     try {
       var r = await fetch("/api/plugins/artifact/history", { headers: token ? { Authorization: "Bearer " + token } : {} });
       var d = await r.json(); items = (d && d.items) || [];
@@ -220,4 +221,5 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
     } catch (e) { /* transient */ }
   }
   setInterval(poll, 1500); poll();
+  document.addEventListener("visibilitychange", function(){ if(!document.hidden) poll(); }); // refresh on return
 </script></body></html>"""
