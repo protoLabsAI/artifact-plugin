@@ -27,32 +27,52 @@ log = logging.getLogger("protoagent.plugins.artifact")
 _KINDS = {"html", "svg", "mermaid", "react"}
 
 
-def _artifact_path() -> Path:
+# Keep the last N artifacts (ARTIFACT_HISTORY overrides) so the user can revisit + download past
+# renders, not just the latest.
+_MAX_HISTORY = max(1, int(os.environ.get("ARTIFACT_HISTORY", "20") or "20"))
+
+
+def _history_path() -> Path:
     base = Path(os.environ.get("ARTIFACT_DIR") or (Path.home() / ".protoagent" / "artifact"))
     inst = os.environ.get("PROTOAGENT_INSTANCE", "").strip()
     if inst:
         base = base / inst
     base.mkdir(parents=True, exist_ok=True)
-    return base / "current.json"
+    return base / "history.json"
 
 
-def _read_current() -> dict:
+def _read_history() -> list[dict]:
     try:
-        return json.loads(_artifact_path().read_text(encoding="utf-8"))
+        data = json.loads(_history_path().read_text(encoding="utf-8"))
+        items = data.get("items") if isinstance(data, dict) else data
+        return items if isinstance(items, list) else []
     except (FileNotFoundError, ValueError):
-        return {"kind": "", "code": "", "title": "", "ts": 0}
+        return []
 
 
-def _write_current(payload: dict) -> None:
-    path = _artifact_path()
+def _write_history(items: list[dict]) -> None:
+    path = _history_path()
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
+            json.dump({"items": items}, fh)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+# Set at register() so the tool can broadcast on the bus (ADR 0039). Under the default runtime the
+# tool runs in the server process where the bus is wired; the dot lights from artifact.created.
+_REGISTRY = None
+
+
+def _emit(event: str, data: dict) -> None:
+    try:
+        if _REGISTRY is not None:
+            _REGISTRY.emit(event, data)  # → "artifact.<event>" (namespace-guarded)
+    except Exception:  # noqa: BLE001 — emitting must never break the tool
+        log.debug("[artifact] emit(%s) failed", event, exc_info=True)
 
 
 @tool
@@ -69,7 +89,12 @@ def show_artifact(kind: str, code: str, title: str = "") -> str:
     k = (kind or "").strip().lower()
     if k not in _KINDS:
         return f"Unknown artifact kind {kind!r}. Use one of: {', '.join(sorted(_KINDS))}."
-    _write_current({"kind": k, "code": code or "", "title": title or "", "ts": int(time.time() * 1000)})
+    ts = int(time.time() * 1000)
+    item = {"id": str(ts), "kind": k, "code": code or "", "title": title or "", "ts": ts}
+    items = [item] + _read_history()
+    _write_history(items[:_MAX_HISTORY])
+    # Broadcast so the console lights the Artifact rail icon even when the panel is closed.
+    _emit("created", {"id": item["id"], "kind": k, "title": title or ""})
     return f"Rendered a {k} artifact ({len(code or '')} chars) to the Artifact panel."
 
 
@@ -81,7 +106,12 @@ def _build_router():
 
     @router.get("/current")
     async def _current_artifact() -> dict:
-        return _read_current()
+        items = _read_history()
+        return items[0] if items else {"kind": "", "code": "", "title": "", "ts": 0}
+
+    @router.get("/history")
+    async def _history() -> dict:
+        return {"items": _read_history()}
 
     @router.get("/view")
     async def _view():
@@ -91,6 +121,8 @@ def _build_router():
 
 
 def register(registry) -> None:
+    global _REGISTRY
+    _REGISTRY = registry
     registry.register_tool(show_artifact)
     registry.register_skill_dir("skills")  # teaches: render with show_artifact, don't write files
     registry.register_router(_build_router(), prefix="/api/plugins/artifact")
@@ -100,32 +132,42 @@ def register(registry) -> None:
 # handshake, polls /current, and renders each new artifact into a NESTED sandboxed iframe. The
 # nested frame is sandbox="allow-scripts" with NO allow-same-origin — generated code is isolated.
 _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
-  :root{ --bg:#0a0a0c; --fg:#ededed; --fg-muted:#9aa0aa; }
+  :root{ --bg:#0a0a0c; --fg:#ededed; --fg-muted:#9aa0aa; --border:#2a2a30; }
   html,body{margin:0;height:100%;background:var(--bg);color:var(--fg-muted);
     font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+  #wrap{display:flex;flex-direction:column;height:100%}
+  /* Toolbar: history picker + download. Hidden until there's at least one artifact. */
+  #bar{display:none;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px}
+  #bar select{flex:1;min-width:0;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:12px}
+  #bar button{background:transparent;color:var(--fg-muted);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px}
+  #stage{flex:1;min-height:0;position:relative}
   #empty{display:flex;align-items:center;justify-content:center;height:100%;text-align:center;padding:24px;font-size:14px}
   /* No white flash — the artifact frame defaults to the console's dark ground (ADR 0038). */
   #frame{border:0;width:100%;height:100%;display:none;background:var(--bg)}
 </style></head><body>
-<div id="empty">No artifact yet. Ask the agent to render one — a chart, diagram, or widget.</div>
-<iframe id="frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+<div id="wrap">
+  <div id="bar"><select id="hist"></select><button id="dl" type="button" title="Download this artifact">Download</button></div>
+  <div id="stage">
+    <div id="empty">No artifact yet. Ask the agent to render one — a chart, diagram, or widget.</div>
+    <iframe id="frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+  </div>
+</div>
 <script>
-  var token = null, lastTs = 0;
+  var token = null, items = [], selId = null, followNewest = true, lastRenderedId = null;
   // Theme follows the console (ADR 0026 bridge). Dark fallbacks so we never flash white.
   var theme = { bg: "#0a0a0c", fg: "#ededed", fgMuted: "#9aa0aa" };
+  var EXT = { html: "html", svg: "svg", mermaid: "mmd", react: "jsx" };
   window.addEventListener("message", function (e) {
     var m = e.data || {}; if (m.type !== "protoagent:init") return;
     token = m.token || null;
     if (m.theme) {
       theme = { bg: m.theme.bg || theme.bg, fg: m.theme.fg || theme.fg, fgMuted: m.theme.fgMuted || theme.fgMuted };
-      document.documentElement.style.setProperty("--bg", theme.bg);
-      document.documentElement.style.setProperty("--fg", theme.fg);
-      document.documentElement.style.setProperty("--fg-muted", theme.fgMuted);
+      var r = document.documentElement.style;
+      r.setProperty("--bg", theme.bg); r.setProperty("--fg", theme.fg); r.setProperty("--fg-muted", theme.fgMuted);
+      if (m.theme.border) r.setProperty("--border", m.theme.border);
     }
   });
   function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
-  // Base style injected into every artifact so unstyled content inherits the console's dark theme
-  // by default (generated code can still set its own background to override).
   function base(){ return '<style>html,body{margin:0;background:' + theme.bg + ';color:' + theme.fg + '}</style>'; }
   function srcdoc(kind, code) {
     if (kind === "html") return base() + code;
@@ -140,17 +182,41 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
       '<script type="text/babel" data-presets="react">' + code + '<\/script></body>';
     return '<!doctype html>' + base() + '<body style="font-family:sans-serif;padding:16px">unsupported artifact kind</body>';
   }
+  function current(){ for (var i=0;i<items.length;i++) if (items[i].id===selId) return items[i]; return items[0]||null; }
+  function label(it, i){ var t = it.title || (it.kind + " artifact"); return (i===0?"● ":"") + t + "  ·  " + it.kind; }
+  function rebuildSelect(){
+    var sel = document.getElementById("hist"); sel.innerHTML = "";
+    items.forEach(function(it,i){ var o=document.createElement("option"); o.value=it.id; o.textContent=label(it,i); sel.appendChild(o); });
+    if (selId) sel.value = selId;
+  }
+  function render(){
+    var it = current();
+    document.getElementById("bar").style.display = items.length ? "flex" : "none";
+    if (!it || !it.code){ return; }
+    document.getElementById("empty").style.display = "none";
+    if (it.id !== lastRenderedId){
+      lastRenderedId = it.id;
+      var f = document.getElementById("frame");
+      f.srcdoc = srcdoc(it.kind, it.code); f.style.display = "block";
+    }
+  }
+  document.getElementById("hist").addEventListener("change", function(e){
+    selId = e.target.value; followNewest = items.length && selId === items[0].id; render();
+  });
+  document.getElementById("dl").addEventListener("click", function(){
+    var it = current(); if (!it) return;
+    var blob = new Blob([it.code], { type: "text/plain" });
+    var a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = "artifact-" + it.id + "." + (EXT[it.kind] || "txt");
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  });
   async function poll() {
     try {
-      var r = await fetch("/api/plugins/artifact/current", { headers: token ? { Authorization: "Bearer " + token } : {} });
-      var a = await r.json();
-      if (a && a.ts && a.ts !== lastTs && a.code) {
-        lastTs = a.ts;
-        document.getElementById("empty").style.display = "none";
-        var f = document.getElementById("frame");
-        f.srcdoc = srcdoc(a.kind, a.code);
-        f.style.display = "block";
-      }
+      var r = await fetch("/api/plugins/artifact/history", { headers: token ? { Authorization: "Bearer " + token } : {} });
+      var d = await r.json(); items = (d && d.items) || [];
+      if (!items.length) return;
+      if (followNewest || !selId) selId = items[0].id;
+      rebuildSelect(); render();
     } catch (e) { /* transient */ }
   }
   setInterval(poll, 1500); poll();

@@ -1,6 +1,6 @@
 id: artifact
 name: Artifact
-version: 0.1.0
+version: 0.2.0
 description: >-
   A generative-UI surface (ADR 0038): the agent renders HTML / charts / Mermaid diagrams /
   SVG on demand into a sandboxed iframe — the way Claude Artifacts and Open
@@ -9,6 +9,10 @@ description: >-
 enabled: true
 capabilities:
   network: []
-  filesystem: none
+  filesystem: scoped     # a small artifact history under the instance data dir
 views:
   - { id: artifact, label: "Artifact", icon: "Sparkles", placement: right, path: "/api/plugins/artifact/view" }
+# Event contract (ADR 0039) — broadcast when the agent renders an artifact, so the console lights
+# the Artifact rail icon even when the panel is closed.
+emits:
+  - artifact.created

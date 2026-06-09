@@ -23,7 +23,10 @@ console view.
 ## What it adds
 
 - **Tool** `show_artifact(kind, code, title)` — `kind` ∈ `html` · `svg` · `mermaid` · `react`.
-- **View** "Artifact" (right rail) — a sandboxed renderer that polls for the current artifact.
+- **View** "Artifact" (right rail) — a sandboxed renderer with a **history picker** (revisit the last
+  `ARTIFACT_HISTORY` renders, default 20) and a **download** button (saves the artifact's source).
+- **Event** `artifact.created` (ADR 0039) — broadcast on the bus when the agent renders, so the
+  console lights the Artifact rail icon even when the panel is closed.
 - **Skill** `rendering-artifacts` — nudges the agent to render (vs writing files) for "show me…".
 
 ## Security
