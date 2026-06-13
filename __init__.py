@@ -28,12 +28,27 @@ _KINDS = {"html", "svg", "mermaid", "react"}
 
 
 # Keep the last N artifacts (ARTIFACT_HISTORY overrides) so the user can revisit + download past
-# renders, not just the latest.
-_MAX_HISTORY = max(1, int(os.environ.get("ARTIFACT_HISTORY", "20") or "20"))
+# renders, not just the latest. A bad env value must not crash plugin load — fall back to 20.
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.environ.get(name, "") or default))
+    except (TypeError, ValueError):
+        log.warning("[artifact] %s is not an integer — using %d", name, default)
+        return default
+
+
+_MAX_HISTORY = _env_int("ARTIFACT_HISTORY", 20)
+
+# Cap a single artifact's source so one runaway render can't bloat history.json (the
+# whole history is read+rewritten on every render). ~512 KB is generous for hand- or
+# model-written HTML/SVG/React; override with ARTIFACT_MAX_CODE_KB.
+_MAX_CODE_BYTES = _env_int("ARTIFACT_MAX_CODE_KB", 512) * 1024
 
 
 def _history_path() -> Path:
-    base = Path(os.environ.get("ARTIFACT_DIR") or (Path.home() / ".protoagent" / "artifact"))
+    base = Path(
+        os.environ.get("ARTIFACT_DIR") or (Path.home() / ".protoagent" / "artifact")
+    )
     inst = os.environ.get("PROTOAGENT_INSTANCE", "").strip()
     if inst:
         base = base / inst
@@ -88,19 +103,50 @@ def show_artifact(kind: str, code: str, title: str = "") -> str:
     """
     k = (kind or "").strip().lower()
     if k not in _KINDS:
-        return f"Unknown artifact kind {kind!r}. Use one of: {', '.join(sorted(_KINDS))}."
+        return (
+            f"Unknown artifact kind {kind!r}. Use one of: {', '.join(sorted(_KINDS))}."
+        )
+    code = code or ""
+    if len(code.encode("utf-8")) > _MAX_CODE_BYTES:
+        return (
+            f"Artifact too large ({len(code.encode('utf-8')) // 1024} KB > "
+            f"{_MAX_CODE_BYTES // 1024} KB). Trim the source or split it; raise "
+            f"ARTIFACT_MAX_CODE_KB if you really need more."
+        )
     ts = int(time.time() * 1000)
-    item = {"id": str(ts), "kind": k, "code": code or "", "title": title or "", "ts": ts}
+    item = {"id": str(ts), "kind": k, "code": code, "title": title or "", "ts": ts}
     items = [item] + _read_history()
     _write_history(items[:_MAX_HISTORY])
     # Broadcast so the console lights the Artifact rail icon even when the panel is closed.
     _emit("created", {"id": item["id"], "kind": k, "title": title or ""})
-    return f"Rendered a {k} artifact ({len(code or '')} chars) to the Artifact panel."
+    return f"Rendered a {k} artifact ({len(code)} chars) to the Artifact panel."
 
 
-def _build_router():
+def _build_view_router():
+    """The shell PAGE — served under the PUBLIC ``/plugins/artifact`` prefix
+    (plugin-view rule 2): a browser iframe page-load can't carry an Authorization
+    bearer, so a gated page 401-blanks under the token gate. The page is also where
+    the slug-aware base is derived (``location.pathname.split("/plugins/")[0]``), so
+    it MUST live under ``/plugins/`` — a ``/api/plugins/`` page poisons the base to
+    ``/api`` and the kit's ``/_ds/`` assets 404 (the bug this split fixes). The page
+    fetches its DATA from the gated data router with the handshake token."""
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse
+
+    router = APIRouter()
+
+    @router.get("/view")
+    async def _view():
+        return HTMLResponse(_SHELL_HTML)
+
+    return router
+
+
+def _build_data_router():
+    """The DATA routes — mounted under ``/api/plugins/artifact`` so they inherit the
+    operator bearer gate (plugin-view rule 2). Read-only history of rendered
+    artifacts, fetched from the shell page with the handshake token."""
+    from fastapi import APIRouter
 
     router = APIRouter()
 
@@ -113,10 +159,6 @@ def _build_router():
     async def _history() -> dict:
         return {"items": _read_history()}
 
-    @router.get("/view")
-    async def _view():
-        return HTMLResponse(_SHELL_HTML)
-
     return router
 
 
@@ -124,8 +166,14 @@ def register(registry) -> None:
     global _REGISTRY
     _REGISTRY = registry
     registry.register_tool(show_artifact)
-    registry.register_skill_dir("skills")  # teaches: render with show_artifact, don't write files
-    registry.register_router(_build_router(), prefix="/api/plugins/artifact")
+    registry.register_skill_dir(
+        "skills"
+    )  # teaches: render with show_artifact, don't write files
+    # TWO routers at DISTINCT prefixes (a same-prefix second router is silently
+    # de-duped by the host): the PAGE on public /plugins/artifact (iframe-loadable,
+    # base-derivation-safe) and the DATA routes on gated /api/plugins/artifact.
+    registry.register_router(_build_view_router(), prefix="/plugins/artifact")
+    registry.register_router(_build_data_router(), prefix="/api/plugins/artifact")
 
 
 # The shell page (ADR 0026 iframe). It takes the operator bearer via the console's postMessage
