@@ -52,12 +52,13 @@ reach the console, its cookies, or its APIs (the Claude Artifacts / Open WebUI m
 protoAgent's
 [security & trust model](https://github.com/protoLabsAI/protoAgent/blob/main/docs/explanation/security-and-trust.md).
 
-> **Network note.** The `react` and `mermaid` kinds load their libraries from `cdnjs` **inside the
-> sandbox** — so those renders need outbound network and won't work fully offline. Those CDN scripts
-> are pinned with **Subresource Integrity** (`integrity` + `crossorigin`), so a tampered file won't
-> execute (bump the version and the hash together — hashes from `api.cdnjs.com`). The plugin's own
-> server code makes no outbound calls (`capabilities.network: []`). `html` and `svg` are fully
-> self-contained.
+> **Offline / no network.** The `react` and `mermaid` libraries (React, ReactDOM, Babel, Mermaid)
+> are **vendored** under `vendor/` and served same-origin from `/plugins/artifact/vendor/…`, so every
+> artifact kind renders **fully offline** — no `cdnjs`, no outbound network at all
+> (`capabilities.network: []` is literally true). The scripts are still pinned with **Subresource
+> Integrity** (`integrity` + `crossorigin="anonymous"` — required because the sandbox is an opaque
+> origin, so the load is cross-origin); a tampered served file won't execute. To bump a lib, replace
+> the file in `vendor/`, recompute its `sha512` SRI, and update the `LIB` map in the shell page.
 
 ## Development
 

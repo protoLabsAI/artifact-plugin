@@ -26,6 +26,16 @@ log = logging.getLogger("protoagent.plugins.artifact")
 
 _KINDS = {"html", "svg", "mermaid", "react"}
 
+# Vendored JS libs served same-origin so react/mermaid artifacts work offline.
+# Allowlist (no path traversal) — must match the files in vendor/ and the LIB map
+# in the shell page. SRI in the shell pins their exact bytes.
+_VENDOR_FILES = {
+    "mermaid.min.js",
+    "react.production.min.js",
+    "react-dom.production.min.js",
+    "babel.min.js",
+}
+
 
 # Keep the last N artifacts (ARTIFACT_HISTORY overrides) so the user can revisit + download past
 # renders, not just the latest. A bad env value must not crash plugin load — fall back to 20.
@@ -131,13 +141,37 @@ def _build_view_router():
     ``/api`` and the kit's ``/_ds/`` assets 404 (the bug this split fixes). The page
     fetches its DATA from the gated data router with the handshake token."""
     from fastapi import APIRouter
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import FileResponse, HTMLResponse, Response
 
     router = APIRouter()
 
     @router.get("/view")
     async def _view():
         return HTMLResponse(_SHELL_HTML)
+
+    # Vendored JS libs (react/react-dom/babel/mermaid) served SAME-ORIGIN so the
+    # react/mermaid kinds work fully OFFLINE — no cdnjs dependency, and the
+    # `network: []` capability is now literally true. Allowlisted (no path
+    # traversal); the sandboxed artifact iframe loads these by absolute URL.
+    # Versioned bytes → cache hard; SRI in the artifact still pins them.
+    @router.get("/vendor/{name}")
+    async def _vendor(name: str):
+        if name not in _VENDOR_FILES:
+            return Response(status_code=404)
+        f = Path(__file__).parent / "vendor" / name
+        if not f.exists():
+            return Response(status_code=404, content=f"{name} not vendored")
+        return FileResponse(
+            f,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                # The sandboxed artifact iframe is an opaque origin, so its load of
+                # this lib is cross-origin → CORS + crossorigin="anonymous" are
+                # needed for the SRI check to run.
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
     return router
 
@@ -229,24 +263,29 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     var fg = (cs.getPropertyValue("--pl-color-fg") || "#ededed").trim();
     return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>';
   }
-  // Pinned CDN libs WITH Subresource Integrity. The artifact sandbox already has no
-  // same-origin (a compromised script can't reach the console), but SRI also closes
-  // the supply-chain/tamper vector: a CDN file that doesn't match the hash won't
-  // execute. crossorigin="anonymous" is required for SRI on cross-origin scripts
-  // (cdnjs sends Access-Control-Allow-Origin: *). Bump the version AND the hash
-  // together — hashes are from api.cdnjs.com/libraries/<lib>/<version>?fields=sri.
-  var CDN = {
-    mermaid: ["https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js",
+  // Artifact libs are VENDORED + served same-origin (/plugins/artifact/vendor/…), so
+  // react/mermaid renders work fully OFFLINE — no cdnjs dependency. Still pinned with
+  // Subresource Integrity (sha512 of the exact vendored bytes), so a tampered served
+  // file won't execute. Absolute URL (origin + base) because an srcdoc iframe has no
+  // own URL to resolve a relative path against. Bump the file AND the hash together.
+  var ORIGIN = location.origin + window.__base;  // "" + base, slug-aware
+  var LIB = {
+    mermaid: ["mermaid.min.js",
       "sha512-6a80OTZVmEJhqYJUmYd5z8yHUCDlYnj6q9XwB/gKOEyNQV/Q8u+XeSG59a2ZKFEHGTYzgfOQKYEBtrZV7vBr+Q=="],
-    react: ["https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js",
+    react: ["react.production.min.js",
       "sha512-QVs8Lo43F9lSuBykadDb0oSXDL/BbZ588urWVCRwSIoewQv/Ewg1f84mK3U790bZ0FfhFa1YSQUmIhG+pIRKeg=="],
-    reactDom: ["https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js",
+    reactDom: ["react-dom.production.min.js",
       "sha512-6a1107rTlA4gYpgHAqbwLAtxmWipBdJFcq8y5S/aTge3Bp+VAklABm2LO+Kg51vOWR9JMZq1Ovjl5tpluNpTeQ=="],
-    babel: ["https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js",
+    babel: ["babel.min.js",
       "sha512-bAHF//mCdqGSgyUBqhtDgaGLxsraipURsQRGG+3uNncZdsFA6/283u21SOwB6rzINUXSATUMoZaXm4IaV2Lw2Q=="],
   };
-  function cdn(name){ var c = CDN[name];
-    return '<script crossorigin="anonymous" integrity="' + c[1] + '" src="' + c[0] + '"><\/script>'; }
+  // crossorigin="anonymous" is REQUIRED even though the lib is same-origin to the
+  // shell: the artifact runs in a no-same-origin sandbox (opaque origin), so its
+  // subresource loads are cross-origin — SRI on a cross-origin script without
+  // crossorigin can't validate and the browser blocks it. The vendor route sends
+  // Access-Control-Allow-Origin:* to satisfy the CORS fetch.
+  function cdn(name){ var c = LIB[name];
+    return '<script crossorigin="anonymous" integrity="' + c[1] + '" src="' + ORIGIN + '/plugins/artifact/vendor/' + c[0] + '"><\/script>'; }
   function srcdoc(kind, code) {
     if (kind === "html") return base() + code;
     if (kind === "svg") return '<!doctype html>' + base() + '<body style="display:grid;place-items:center;min-height:100vh">' + code + '</body>';

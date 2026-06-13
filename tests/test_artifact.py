@@ -178,14 +178,48 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     assert 'addEventListener("message"' not in html
 
 
-def test_every_cdn_script_is_pinned_with_sri(monkeypatch, tmp_path):
-    """No external CDN lib loads unpinned: every cdnjs URL is paired with an SRI hash,
-    and the tag builder emits integrity + crossorigin. Guards against an unpinned
-    `<script src=…>` sneaking back in (supply-chain / tamper)."""
+def test_libs_are_vendored_same_origin_not_cdn(monkeypatch, tmp_path):
+    """react/mermaid load from the same-origin vendor route — NO cdnjs (so artifacts
+    work offline), every lib still SRI-pinned (sha512 of the vendored bytes)."""
     html = _load(monkeypatch, tmp_path)._SHELL_HTML
-    n_urls = html.count("https://cdnjs.cloudflare.com")
-    n_sri = html.count("sha512-") + html.count("sha384-")
-    assert n_urls == 4 and n_sri == 4, (
-        f"{n_urls} CDN urls vs {n_sri} SRI hashes — every CDN lib must be pinned"
-    )
-    assert 'integrity="' in html and 'crossorigin="anonymous"' in html
+    assert "cdnjs.cloudflare.com" not in html  # no external CDN dependency
+    assert "/plugins/artifact/vendor/" in html  # served same-origin
+    # all four libs present, each with an integrity hash.
+    for lib in (
+        "mermaid.min.js",
+        "react.production.min.js",
+        "react-dom.production.min.js",
+        "babel.min.js",
+    ):
+        assert lib in html
+    assert html.count("sha512-") == 4 and 'integrity="' in html
+    # crossorigin is REQUIRED even same-origin: the sandbox is an opaque origin, so
+    # the lib load is cross-origin and SRI needs the CORS fetch to validate.
+    assert 'crossorigin="anonymous"' in html
+
+
+def test_vendored_files_exist_and_match_the_allowlist(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    vendor = ROOT / "vendor"
+    for name in art._VENDOR_FILES:
+        assert (vendor / name).exists(), f"vendor/{name} missing"
+    # no stray files served that aren't on disk, no disk files unlisted.
+    on_disk = {p.name for p in vendor.glob("*.js")}
+    assert on_disk == art._VENDOR_FILES
+
+
+def test_vendor_route_serves_js_and_blocks_traversal(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    art = _load(monkeypatch, tmp_path)
+    c = TestClient(_app(art))
+    r = c.get("/plugins/artifact/vendor/react.production.min.js")
+    assert r.status_code == 200
+    assert "javascript" in r.headers["content-type"]
+    assert "immutable" in r.headers.get("cache-control", "")
+    assert (
+        r.headers.get("access-control-allow-origin") == "*"
+    )  # SRI from the opaque sandbox
+    # allowlist: an unlisted name / traversal attempt is a clean 404, not a file read.
+    assert c.get("/plugins/artifact/vendor/secrets.env").status_code == 404
+    assert c.get("/plugins/artifact/vendor/..%2f__init__.py").status_code == 404
