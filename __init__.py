@@ -154,6 +154,11 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
 </div>
 <script>
   var token = null, items = [], selId = null, followNewest = true, lastRenderedId = null;
+  // Slug-aware base (protoAgent ADR 0042, plugin-view rule 3): the iframe loads at
+  // /plugins/artifact/view on the host window but /agents/<slug>/plugins/artifact/view
+  // through the fleet proxy — a hardcoded "/api/..." there would fetch the HUB agent's
+  // artifact history, never this agent's. Prefix every data fetch.
+  var BASE = location.pathname.split("/plugins/")[0];
   // Theme follows the console (ADR 0026 bridge). Dark fallbacks so we never flash white.
   var theme = { bg: "#0a0a0c", fg: "#ededed", fgMuted: "#9aa0aa" };
   var EXT = { html: "html", svg: "svg", mermaid: "mmd", react: "jsx" };
@@ -213,7 +218,7 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
   async function poll() {
     if (document.hidden) return;  // don't poll while the window is hidden/minimized (desktop perf)
     try {
-      var r = await fetch("/api/plugins/artifact/history", { headers: token ? { Authorization: "Bearer " + token } : {} });
+      var r = await fetch(BASE + "/api/plugins/artifact/history", { headers: token ? { Authorization: "Bearer " + token } : {} });
       var d = await r.json(); items = (d && d.items) || [];
       if (!items.length) return;
       if (followNewest || !selId) selId = items[0].id;
