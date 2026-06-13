@@ -87,8 +87,8 @@ def _cfg_int(key: str, env: str, default: int, minimum: int = 1) -> int:
     return default
 
 
-# History/version/size caps (config or env; not UI fields — numeric, and the settings
-# schema has no int type). Read live via functions so a config change applies at once.
+# History/version/size caps — Settings ▸ Plugins number fields (env override).
+# Read live via functions so a config change applies at once.
 def _max_history() -> int:
     return _cfg_int("history", "ARTIFACT_HISTORY", 20)
 
