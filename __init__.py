@@ -363,7 +363,7 @@ def _build_data_router():
     """The DATA routes — mounted under ``/api/plugins/artifact`` so they inherit the
     operator bearer gate (plugin-view rule 2). The shell page reads them with the
     handshake token; DELETE is the panel's user-driven cleanup."""
-    from fastapi import APIRouter, HTTPException
+    from fastapi import APIRouter, Body, HTTPException
 
     router = APIRouter()
 
@@ -396,6 +396,27 @@ def _build_data_router():
         """The full store — every artifact with its version chain — for the panel's
         artifact picker + version navigation."""
         return _read_store()
+
+    @router.put("/artifact/{art_id}")
+    async def _save_edit(art_id: str, body: dict = Body(...)) -> dict:
+        """Save a USER edit (the panel's in-panel code editor) as a new version. Like the
+        agent's rewrite, but tagged ``by: user`` so the provenance is visible — and, like
+        every edit, it APPENDS a version rather than overwriting (no silent clobber)."""
+        code = str(body.get("code", ""))
+        if err := _too_big(code):
+            raise HTTPException(413, err)
+        store = _read_store()
+        art = _find(store, art_id)
+        if art is None:
+            raise HTTPException(404, f"unknown artifact {art_id}")
+        now = _now()
+        art["versions"].append({"code": code, "ts": now, "by": "user"})
+        art["updated"] = now
+        _touch(store, art)
+        _write_store(store)
+        v = len(art["versions"])
+        _emit("updated", {"id": art_id, "version": v})
+        return {"ok": True, "id": art_id, "version": v}
 
     @router.delete("/artifact/{art_id}")
     async def _delete(art_id: str) -> dict:
@@ -463,6 +484,15 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   #empty{display:flex;align-items:center;justify-content:center;height:100%;text-align:center;padding:24px;font-size:14px}
   /* No white flash — the artifact frame defaults to the console's ground (ADR 0038). */
   #frame{border:0;width:100%;height:100%;display:none;background:var(--pl-color-bg,#0a0a0c)}
+  /* In-panel code editor (direct user editing → a new version). */
+  #editor{position:absolute;inset:0;display:none;flex-direction:column;background:var(--pl-color-bg,#0a0a0c)}
+  #code{flex:1;min-height:0;resize:none;border:0;outline:none;padding:10px;background:transparent;
+    color:var(--pl-color-fg,#ededed);font-family:var(--pl-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+    font-size:12px;line-height:1.5;tab-size:2}
+  #ebar{display:flex;align-items:center;gap:6px;padding:6px 10px;
+    border-top:var(--pl-border-width,1px) solid var(--pl-color-border,#2a2a30)}
+  #estat{color:var(--pl-color-fg-muted,#9aa0aa);font-size:12px}
+  #ebar .grow{flex:1}
 </style></head><body>
 <div id="wrap">
   <div id="bar">
@@ -472,12 +502,21 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
       <span id="vlabel"></span>
       <button id="vnext" class="pl-btn pl-btn--sm" type="button" title="Next version">›</button>
     </span>
+    <button id="edit" class="pl-btn pl-btn--sm" type="button" title="Edit the source">Edit</button>
     <button id="dl" class="pl-btn pl-btn--sm" type="button" title="Download this version">Download</button>
     <button id="del" class="pl-btn pl-btn--sm" type="button" title="Delete this artifact">Delete</button>
   </div>
   <div id="stage">
     <div id="empty">No artifact yet. Ask the agent to render one — a chart, diagram, or widget.</div>
     <iframe id="frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
+    <div id="editor">
+      <textarea id="code" class="pl-input" spellcheck="false" placeholder="Edit the artifact source…"></textarea>
+      <div id="ebar">
+        <span id="estat"></span><span class="grow"></span>
+        <button id="cancel" class="pl-btn pl-btn--sm" type="button">Cancel</button>
+        <button id="run" class="pl-btn pl-btn--primary pl-btn--sm" type="button">Run &amp; save</button>
+      </div>
+    </div>
   </div>
 </div>
 <script type="module">
@@ -543,7 +582,11 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
       $vnext=document.getElementById("vnext"), $vlabel=document.getElementById("vlabel"),
       $dl=document.getElementById("dl"), $del=document.getElementById("del"),
       $bar=document.getElementById("bar"), $empty=document.getElementById("empty"),
-      $frame=document.getElementById("frame");
+      $frame=document.getElementById("frame"), $edit=document.getElementById("edit"),
+      $editor=document.getElementById("editor"), $code=document.getElementById("code"),
+      $run=document.getElementById("run"), $cancel=document.getElementById("cancel"),
+      $estat=document.getElementById("estat");
+  var editing=false;
 
   function selArt(){ for(var i=0;i<arts.length;i++) if(arts[i].id===selId) return arts[i]; return arts[0]||null; }
   function verIdx(a){ // selVer clamped to a's range; null/out-of-range → latest (auto-follow)
@@ -596,6 +639,29 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     clearTimeout(delT); delArm=null; $del.textContent="Delete";
     try{ await kit.apiFetch("/api/plugins/artifact/artifact/"+encodeURIComponent(a.id),{method:"DELETE"}); }catch(e){}
     selId=null; selVer=null; followNewest=true; poll();
+  });
+
+  // In-panel code editor — edit the SELECTED version's source and save it as a NEW
+  // version (by:"user"), so direct editing never clobbers the agent's versions.
+  function enterEdit(){
+    var a=selArt(); if(!a) return; var vi=verIdx(a);
+    $code.value=a.versions[vi].code; $estat.textContent="";
+    editing=true; $edit.textContent="Editing"; $editor.style.display="flex";
+    $frame.style.display="none"; $empty.style.display="none"; $code.focus();
+  }
+  function exitEdit(){ editing=false; $edit.textContent="Edit"; $editor.style.display="none"; lastRendered=""; render(); }
+  $edit.addEventListener("click", function(){ editing ? exitEdit() : enterEdit(); });
+  $cancel.addEventListener("click", exitEdit);
+  $run.addEventListener("click", async function(){
+    var a=selArt(); if(!a) return;
+    $estat.textContent="Saving…"; $run.disabled=true;
+    try{
+      var r=await kit.apiFetch("/api/plugins/artifact/artifact/"+encodeURIComponent(a.id),
+        {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:$code.value})});
+      if(!r.ok) throw 0;
+      followNewest=true; await poll(); exitEdit();   // show the just-saved new version
+    }catch(e){ $estat.textContent="Save failed"; }
+    $run.disabled=false;
   });
 
   async function poll() {
