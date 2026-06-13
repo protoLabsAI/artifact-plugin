@@ -1,6 +1,6 @@
 id: artifact
 name: Artifact
-version: 0.2.2
+version: 0.3.0
 description: >-
   A generative-UI surface (ADR 0038): the agent renders HTML / charts / Mermaid diagrams /
   SVG on demand into a sandboxed iframe — the way Claude Artifacts and Open
