@@ -1,6 +1,9 @@
 id: artifact
 name: Artifact
-version: 0.3.0
+version: 0.4.0
+# Needs the host to serve the DS plugin-kit at /_ds/ (protoAgent #893, v0.34.0) —
+# the shell page links it for theming + the authed handshake.
+min_protoagent_version: "0.34.0"
 description: >-
   A generative-UI surface (ADR 0038): the agent renders HTML / charts / Mermaid diagrams /
   SVG on demand into a sandboxed iframe — the way Claude Artifacts and Open
@@ -8,10 +11,15 @@ description: >-
   generated code renders in a nested sandbox with no access to the console.
 enabled: true
 capabilities:
+  # The plugin's own server code makes no outbound calls. NB the rendered artifacts
+  # (react/mermaid kinds) load libraries from cdnjs INSIDE the sandbox — see README.
   network: []
   filesystem: scoped     # a small artifact history under the instance data dir
+# The shell page is PUBLIC (an iframe page-load can't carry a bearer, and the page
+# derives its slug base from /plugins/…); its data routes are gated under
+# /api/plugins/artifact (plugin-view rule 2).
 views:
-  - { id: artifact, label: "Artifact", icon: "Sparkles", placement: right, path: "/api/plugins/artifact/view" }
+  - { id: artifact, label: "Artifact", icon: "Sparkles", placement: right, path: "/plugins/artifact/view" }
 # Event contract (ADR 0039) — broadcast when the agent renders an artifact, so the console lights
 # the Artifact rail icon even when the panel is closed.
 emits:
