@@ -25,6 +25,27 @@ the user files to wire up themselves — not what they asked for when they want 
 - `react` — a self-contained component script that renders into `#root`; React, ReactDOM, and
   Babel are provided. Write the component **and** the `ReactDOM.createRoot(...).render(...)` call.
 
+## Editing an artifact (don't re-create it)
+
+When the user asks to change something you already rendered, **iterate the same artifact** — don't
+call `show_artifact` again (that makes a near-duplicate and clutters the panel). Use:
+
+- **`update_artifact(old_string, new_string)`** — a targeted edit. `old_string` must appear in the
+  current source **exactly once** (copy it verbatim, whitespace included; add surrounding context
+  to make it unique). This is the fast path — prefer it for small changes. Creates a new version.
+- **`rewrite_artifact(code, title?)`** — replace the whole source. Use for large changes where a
+  targeted edit would be awkward. Creates a new version; the kind is kept.
+
+Each edit is a **version** the user can step back through in the panel, so iterate freely — you're
+never destroying the previous version. Both default to the most-recent artifact; pass
+`artifact_id` to target another.
+
+## Managing artifacts
+
+- **`list_artifacts()`** — see the ids/kinds/titles/version counts (to target an edit or delete).
+- **`delete_artifact(artifact_id)`** — remove one for cleanup. (The user can also delete from the
+  panel's trash button.)
+
 ## When to still write files
 
 Only when the user explicitly wants a **project / files** ("scaffold a repo", "write the component

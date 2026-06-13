@@ -22,19 +22,27 @@ console view.
 
 ## What it adds
 
-- **Tool** `show_artifact(kind, code, title)` — `kind` ∈ `html` · `svg` · `mermaid` · `react`.
-- **View** "Artifact" (right rail) — a sandboxed renderer with a **history picker** (revisit the last
-  `ARTIFACT_HISTORY` renders, default 20) and a **download** button (saves the artifact's source).
-- **Event** `artifact.created` (ADR 0039) — broadcast on the bus when the agent renders, so the
-  console lights the Artifact rail icon even when the panel is closed.
-- **Skill** `rendering-artifacts` — nudges the agent to render (vs writing files) for "show me…".
+- **Tools** — an artifact is a **version chain** (the Claude "update vs rewrite" model), so editing
+  iterates the same artifact instead of flooding the panel with near-duplicates:
+  - `show_artifact(kind, code, title)` — **create** (`kind` ∈ `html` · `svg` · `mermaid` · `react`).
+  - `update_artifact(old_string, new_string, artifact_id?)` — **targeted edit** (string-replace,
+    must match once) → new version. The fast path for small changes.
+  - `rewrite_artifact(code, title?, artifact_id?)` — **full replace** → new version.
+  - `list_artifacts()` / `delete_artifact(artifact_id)` — manage them.
+- **View** "Artifact" (right rail) — a sandboxed renderer with an **artifact picker**, **version
+  navigation** (step back/forward through edits), **download** (this version), and **delete**.
+- **Events** `artifact.created` / `artifact.updated` / `artifact.deleted` (ADR 0039) — broadcast on
+  the bus so the console lights the Artifact rail icon even when the panel is closed.
+- **Skill** `rendering-artifacts` — teaches render-don't-write-files and the edit-don't-recreate
+  workflow.
 
 ## Configuration
 
 | Env | Default | What |
 |---|---|---|
-| `ARTIFACT_HISTORY` | `20` | How many past renders to keep (revisit/download). Bad value → falls back to the default, never crashes load. |
-| `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per artifact; a larger render is rejected with a message (keeps `history.json` bounded). |
+| `ARTIFACT_HISTORY` | `20` | How many artifacts to keep (oldest evicted). Bad value → falls back to the default, never crashes load. |
+| `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed) — bounds a long edit session. |
+| `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version; a larger render is rejected with a message (keeps `history.json` bounded). |
 | `ARTIFACT_DIR` | `~/.protoagent/artifact` | Where history is stored (instance-scoped by `PROTOAGENT_INSTANCE`). |
 
 ## Routes

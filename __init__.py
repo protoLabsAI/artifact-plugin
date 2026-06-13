@@ -1,14 +1,17 @@
 """Artifact plugin (ADR 0038) — generative UI on demand.
 
 The agent calls ``show_artifact(kind, code)`` to render HTML / SVG / Mermaid / React into the
-console's Artifact panel. The panel is a plugin-served shell page (iframed by the console, ADR
-0026) that renders the agent's generated code in a **nested sandboxed iframe**
-(``sandbox="allow-scripts"``, no same-origin) — the same isolation model as Claude Artifacts and
-Open WebUI: generated code runs, but can't touch the console, its cookies, or its APIs.
+console's Artifact panel, then iterates it with ``update_artifact`` (a targeted string-replace
+edit) or ``rewrite_artifact`` (a full replacement) — the Claude "update vs rewrite" model, so an
+artifact is a VERSION CHAIN you can step back through, not a flood of near-duplicates.
+``list_artifacts`` / ``delete_artifact`` manage them. The panel is a plugin-served shell page
+(iframed by the console, ADR 0026) that renders the generated code in a **nested sandboxed
+iframe** (``sandbox="allow-scripts"``, no same-origin) — the Claude Artifacts / Open WebUI
+isolation model: generated code runs, but can't touch the console, its cookies, or its APIs.
 
-The current artifact is persisted to a **file** (instance-scoped), not module memory — under the
-ACP runtime the tool executes in the operator-MCP process while the route is served by the main
-process, so the two only share state through disk.
+State is persisted to a **file** (instance-scoped), not module memory — under the ACP runtime the
+tool executes in the operator-MCP process while the route is served by the main process, so the
+two only share state through disk.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import tempfile
 import time
 from pathlib import Path
@@ -55,7 +59,19 @@ _MAX_HISTORY = _env_int("ARTIFACT_HISTORY", 20)
 _MAX_CODE_BYTES = _env_int("ARTIFACT_MAX_CODE_KB", 512) * 1024
 
 
-def _history_path() -> Path:
+# Per-artifact version cap — an artifact is a chain of edits (Claude-style versions);
+# keep the tail bounded so a long edit session can't grow history.json without limit.
+_MAX_VERSIONS = _env_int("ARTIFACT_MAX_VERSIONS", 50)
+
+
+# ── the store ──────────────────────────────────────────────────────────────────
+# An artifact is a VERSION CHAIN: {id, kind, title, versions:[{code, ts, by}], …}.
+# show_artifact creates one; update_artifact/rewrite_artifact append a version (the
+# proven Claude "update vs rewrite" model — iterate the same artifact, don't spam the
+# panel with near-duplicates). The file is {"artifacts": [newest-first], "current": id}.
+
+
+def _store_path() -> Path:
     base = Path(
         os.environ.get("ARTIFACT_DIR") or (Path.home() / ".protoagent" / "artifact")
     )
@@ -66,25 +82,84 @@ def _history_path() -> Path:
     return base / "history.json"
 
 
-def _read_history() -> list[dict]:
+def _now() -> int:
+    return int(time.time() * 1000)
+
+
+def _new_id() -> str:
+    return f"a-{_now()}-{secrets.token_hex(3)}"
+
+
+def _migrate_legacy(it: dict) -> dict:
+    """A pre-0.6 flat history item → a single-version artifact."""
+    ts = it.get("ts") or _now()
+    return {
+        "id": str(it.get("id") or _new_id()),
+        "title": it.get("title", ""),
+        "kind": it.get("kind", ""),
+        "versions": [{"code": it.get("code", ""), "ts": ts, "by": "agent"}],
+        "created": ts,
+        "updated": ts,
+    }
+
+
+def _read_store() -> dict:
+    """``{"artifacts": [newest-first], "current": id|None}``. Tolerates a
+    missing/corrupt file (→ empty) and migrates the legacy flat ``{items:[…]}`` /
+    ``[…]`` shape into single-version artifacts."""
     try:
-        data = json.loads(_history_path().read_text(encoding="utf-8"))
-        items = data.get("items") if isinstance(data, dict) else data
-        return items if isinstance(items, list) else []
+        data = json.loads(_store_path().read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
-        return []
+        return {"artifacts": [], "current": None}
+    if isinstance(data, dict) and isinstance(data.get("artifacts"), list):
+        arts = [
+            a for a in data["artifacts"] if isinstance(a, dict) and a.get("versions")
+        ]
+        cur = data.get("current")
+        if not any(a["id"] == cur for a in arts):
+            cur = arts[0]["id"] if arts else None
+        return {"artifacts": arts, "current": cur}
+    legacy = data.get("items") if isinstance(data, dict) else data
+    if isinstance(legacy, list):
+        arts = [_migrate_legacy(it) for it in legacy if isinstance(it, dict)]
+        return {"artifacts": arts, "current": arts[0]["id"] if arts else None}
+    return {"artifacts": [], "current": None}
 
 
-def _write_history(items: list[dict]) -> None:
-    path = _history_path()
+def _write_store(store: dict) -> None:
+    store["artifacts"] = store.get("artifacts", [])[:_MAX_HISTORY]
+    for a in store["artifacts"]:
+        if len(a.get("versions", [])) > _MAX_VERSIONS:
+            a["versions"] = a["versions"][-_MAX_VERSIONS:]
+    path = _store_path()
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"items": items}, fh)
+            json.dump(store, fh)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _find(store: dict, art_id: str | None) -> dict | None:
+    return next((a for a in store["artifacts"] if a["id"] == art_id), None)
+
+
+def _too_big(code: str) -> str | None:
+    if len(code.encode("utf-8")) > _MAX_CODE_BYTES:
+        return (
+            f"Artifact too large ({len(code.encode('utf-8')) // 1024} KB > "
+            f"{_MAX_CODE_BYTES // 1024} KB). Trim the source or split it; raise "
+            f"ARTIFACT_MAX_CODE_KB if you really need more."
+        )
+    return None
+
+
+def _touch(store: dict, art: dict) -> None:
+    """Move ``art`` to the front (most-recently-touched first) and make it current."""
+    store["current"] = art["id"]
+    store["artifacts"] = [art] + [a for a in store["artifacts"] if a["id"] != art["id"]]
 
 
 # Set at register() so the tool can broadcast on the bus (ADR 0039). Under the default runtime the
@@ -102,14 +177,17 @@ def _emit(event: str, data: dict) -> None:
 
 @tool
 def show_artifact(kind: str, code: str, title: str = "") -> str:
-    """Render a generative-UI artifact into the console's Artifact panel.
+    """CREATE a new generative-UI artifact in the console's Artifact panel.
 
     ``kind`` is one of: "html" (a full or partial HTML document), "svg" (inline SVG markup),
     "mermaid" (a Mermaid diagram definition), or "react" (a self-contained React component script
     that renders into ``#root``; React, ReactDOM and Babel are provided). ``code`` is the source;
-    ``title`` is an optional label. The artifact runs sandboxed — it cannot access the console.
-    Use this to SHOW the user a chart, diagram, mock-up, or interactive widget you generate —
-    prefer it over writing files when the user just wants to see something rendered.
+    ``title`` is an optional label. Runs sandboxed — it can't access the console.
+
+    To EDIT what you just made, use ``update_artifact`` (a small targeted change) or
+    ``rewrite_artifact`` (a full replacement) — they iterate the SAME artifact as a new
+    version instead of cluttering the panel with near-duplicates. Prefer this tool over
+    writing files when the user just wants to SEE something rendered. Returns the artifact id.
     """
     k = (kind or "").strip().lower()
     if k not in _KINDS:
@@ -117,19 +195,124 @@ def show_artifact(kind: str, code: str, title: str = "") -> str:
             f"Unknown artifact kind {kind!r}. Use one of: {', '.join(sorted(_KINDS))}."
         )
     code = code or ""
-    if len(code.encode("utf-8")) > _MAX_CODE_BYTES:
+    if err := _too_big(code):
+        return err
+    store = _read_store()
+    now = _now()
+    art = {
+        "id": _new_id(),
+        "title": title or "",
+        "kind": k,
+        "versions": [{"code": code, "ts": now, "by": "agent"}],
+        "created": now,
+        "updated": now,
+    }
+    store["artifacts"].insert(0, art)
+    store["current"] = art["id"]
+    _write_store(store)
+    _emit("created", {"id": art["id"], "kind": k, "title": title or ""})
+    return (
+        f"Created {k} artifact {art['id']} ({len(code)} chars) — now showing in the Artifact "
+        f"panel. Edit it with update_artifact(old_string, new_string) or rewrite_artifact(code)."
+    )
+
+
+@tool
+def update_artifact(old_string: str, new_string: str, artifact_id: str = "") -> str:
+    """Make a TARGETED edit to an existing artifact: replace ``old_string`` with ``new_string``
+    in its current source, creating a new version. ``old_string`` must match the current source
+    EXACTLY ONCE (whitespace included) — add surrounding context to disambiguate if needed.
+    Defaults to the most-recent artifact; pass ``artifact_id`` to target another (see
+    ``list_artifacts``). Prefer this over ``rewrite_artifact`` for small changes — it's the fast
+    path and keeps the version history clean.
+    """
+    if not old_string:
+        return "old_string must not be empty."
+    store = _read_store()
+    art = _find(store, artifact_id or store["current"])
+    if art is None:
+        return "No artifact to update. Create one with show_artifact first."
+    src = art["versions"][-1]["code"]
+    n = src.count(old_string)
+    if n == 0:
         return (
-            f"Artifact too large ({len(code.encode('utf-8')) // 1024} KB > "
-            f"{_MAX_CODE_BYTES // 1024} KB). Trim the source or split it; raise "
-            f"ARTIFACT_MAX_CODE_KB if you really need more."
+            "old_string not found in the current source — it must match exactly (whitespace "
+            "included). Check the source via list_artifacts or the panel."
         )
-    ts = int(time.time() * 1000)
-    item = {"id": str(ts), "kind": k, "code": code, "title": title or "", "ts": ts}
-    items = [item] + _read_history()
-    _write_history(items[:_MAX_HISTORY])
-    # Broadcast so the console lights the Artifact rail icon even when the panel is closed.
-    _emit("created", {"id": item["id"], "kind": k, "title": title or ""})
-    return f"Rendered a {k} artifact ({len(code)} chars) to the Artifact panel."
+    if n > 1:
+        return (
+            f"old_string matches {n} times — it must match exactly once. Add surrounding "
+            f"context to make it unique."
+        )
+    new_code = src.replace(old_string, new_string, 1)
+    if err := _too_big(new_code):
+        return err
+    now = _now()
+    art["versions"].append({"code": new_code, "ts": now, "by": "agent"})
+    art["updated"] = now
+    _touch(store, art)
+    _write_store(store)
+    v = len(art["versions"])
+    _emit("updated", {"id": art["id"], "version": v})
+    return f"Updated artifact {art['id']} → version {v}."
+
+
+@tool
+def rewrite_artifact(code: str, title: str = "", artifact_id: str = "") -> str:
+    """Replace an artifact's ENTIRE source with ``code``, creating a new version (the kind is
+    kept). Use this for a large change where a targeted ``update_artifact`` would be awkward;
+    prefer ``update_artifact`` for small edits. Optionally update the ``title``. Defaults to the
+    most-recent artifact; pass ``artifact_id`` to target another.
+    """
+    code = code or ""
+    if err := _too_big(code):
+        return err
+    store = _read_store()
+    art = _find(store, artifact_id or store["current"])
+    if art is None:
+        return "No artifact to rewrite. Create one with show_artifact first."
+    now = _now()
+    art["versions"].append({"code": code, "ts": now, "by": "agent"})
+    if title:
+        art["title"] = title
+    art["updated"] = now
+    _touch(store, art)
+    _write_store(store)
+    v = len(art["versions"])
+    _emit("updated", {"id": art["id"], "version": v})
+    return f"Rewrote artifact {art['id']} → version {v}."
+
+
+@tool
+def list_artifacts() -> str:
+    """List the artifacts in the panel (newest first) with id, kind, title and version count,
+    so you can target ``update_artifact`` / ``rewrite_artifact`` / ``delete_artifact`` at a
+    specific one. Read-only."""
+    store = _read_store()
+    if not store["artifacts"]:
+        return "No artifacts yet. Create one with show_artifact."
+    lines = []
+    for a in store["artifacts"]:
+        cur = "  · current" if a["id"] == store["current"] else ""
+        lines.append(
+            f"{a['id']}  [{a['kind']}]  {a['title'] or '(untitled)'}  · v{len(a['versions'])}{cur}"
+        )
+    return "Artifacts (newest first):\n" + "\n".join(lines)
+
+
+@tool
+def delete_artifact(artifact_id: str) -> str:
+    """Delete an artifact (all its versions) from the panel — for cleanup. The user can also
+    delete from the panel's trash button. Pass the ``artifact_id`` (see ``list_artifacts``)."""
+    store = _read_store()
+    if _find(store, artifact_id) is None:
+        return f"No artifact {artifact_id!r}. Use list_artifacts to see the ids."
+    store["artifacts"] = [a for a in store["artifacts"] if a["id"] != artifact_id]
+    if store["current"] == artifact_id:
+        store["current"] = store["artifacts"][0]["id"] if store["artifacts"] else None
+    _write_store(store)
+    _emit("deleted", {"id": artifact_id})
+    return f"Deleted artifact {artifact_id}."
 
 
 def _build_view_router():
@@ -178,20 +361,56 @@ def _build_view_router():
 
 def _build_data_router():
     """The DATA routes — mounted under ``/api/plugins/artifact`` so they inherit the
-    operator bearer gate (plugin-view rule 2). Read-only history of rendered
-    artifacts, fetched from the shell page with the handshake token."""
-    from fastapi import APIRouter
+    operator bearer gate (plugin-view rule 2). The shell page reads them with the
+    handshake token; DELETE is the panel's user-driven cleanup."""
+    from fastapi import APIRouter, HTTPException
 
     router = APIRouter()
 
     @router.get("/current")
     async def _current_artifact() -> dict:
-        items = _read_history()
-        return items[0] if items else {"kind": "", "code": "", "title": "", "ts": 0}
+        """The focused artifact's latest version (back-compat shape + version info)."""
+        store = _read_store()
+        art = _find(store, store["current"])
+        if art is None:
+            return {
+                "id": "",
+                "kind": "",
+                "code": "",
+                "title": "",
+                "ts": 0,
+                "version": 0,
+            }
+        v = art["versions"][-1]
+        return {
+            "id": art["id"],
+            "kind": art["kind"],
+            "code": v["code"],
+            "title": art["title"],
+            "ts": v["ts"],
+            "version": len(art["versions"]),
+        }
 
     @router.get("/history")
     async def _history() -> dict:
-        return {"items": _read_history()}
+        """The full store — every artifact with its version chain — for the panel's
+        artifact picker + version navigation."""
+        return _read_store()
+
+    @router.delete("/artifact/{art_id}")
+    async def _delete(art_id: str) -> dict:
+        """Delete an artifact (the panel's trash button). Gated like the rest."""
+        store = _read_store()
+        if _find(store, art_id) is None:
+            raise HTTPException(404, f"unknown artifact {art_id}")
+        store["artifacts"] = [a for a in store["artifacts"] if a["id"] != art_id]
+        if store["current"] == art_id:
+            store["current"] = (
+                store["artifacts"][0]["id"] if store["artifacts"] else None
+            )
+        _write_store(store)
+        _emit("deleted", {"id": art_id})
+        return {"ok": True, "deleted": art_id}
 
     return router
 
@@ -199,10 +418,17 @@ def _build_data_router():
 def register(registry) -> None:
     global _REGISTRY
     _REGISTRY = registry
-    registry.register_tool(show_artifact)
+    for t in (
+        show_artifact,
+        update_artifact,
+        rewrite_artifact,
+        list_artifacts,
+        delete_artifact,
+    ):
+        registry.register_tool(t)
     registry.register_skill_dir(
         "skills"
-    )  # teaches: render with show_artifact, don't write files
+    )  # teaches: render with show_artifact, edit with update/rewrite, don't write files
     # TWO routers at DISTINCT prefixes (a same-prefix second router is silently
     # de-duped by the host): the PAGE on public /plugins/artifact (iframe-loadable,
     # base-derivation-safe) and the DATA routes on gated /api/plugins/artifact.
@@ -211,7 +437,7 @@ def register(registry) -> None:
 
 
 # The shell page (ADR 0026 iframe). It takes the operator bearer via the console's postMessage
-# handshake, polls /current, and renders each new artifact into a NESTED sandboxed iframe. The
+# handshake, polls /history, and renders the selected artifact+version into a NESTED sandboxed iframe. The
 # nested frame is sandbox="allow-scripts" with NO allow-same-origin — generated code is isolated.
 _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 <script>
@@ -226,17 +452,29 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   html,body{margin:0;height:100%;background:var(--pl-color-bg,#0a0a0c);color:var(--pl-color-fg-muted,#9aa0aa);
     font-family:var(--pl-font-sans,ui-sans-serif,system-ui,sans-serif)}
   #wrap{display:flex;flex-direction:column;height:100%}
-  /* Toolbar: history picker + download. Hidden until there's at least one artifact. */
-  #bar{display:none;align-items:center;gap:8px;padding:6px 10px;
+  /* Toolbar: artifact picker + version nav + download/delete. Hidden until there's one. */
+  #bar{display:none;align-items:center;gap:6px;padding:6px 10px;
     border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border,#2a2a30);font-size:12px}
-  #bar select{flex:1;min-width:0}
+  #art{flex:1;min-width:0}
+  #vnav{display:flex;align-items:center;gap:2px}
+  #vlabel{min-width:48px;text-align:center;color:var(--pl-color-fg-muted);font-variant-numeric:tabular-nums}
+  #vnav button[disabled]{opacity:.4;cursor:default}
   #stage{flex:1;min-height:0;position:relative}
   #empty{display:flex;align-items:center;justify-content:center;height:100%;text-align:center;padding:24px;font-size:14px}
   /* No white flash — the artifact frame defaults to the console's ground (ADR 0038). */
   #frame{border:0;width:100%;height:100%;display:none;background:var(--pl-color-bg,#0a0a0c)}
 </style></head><body>
 <div id="wrap">
-  <div id="bar"><select id="hist" class="pl-input"></select><button id="dl" class="pl-btn pl-btn--sm" type="button" title="Download this artifact">Download</button></div>
+  <div id="bar">
+    <select id="art" class="pl-input" title="Artifact"></select>
+    <span id="vnav">
+      <button id="vprev" class="pl-btn pl-btn--sm" type="button" title="Previous version">‹</button>
+      <span id="vlabel"></span>
+      <button id="vnext" class="pl-btn pl-btn--sm" type="button" title="Next version">›</button>
+    </span>
+    <button id="dl" class="pl-btn pl-btn--sm" type="button" title="Download this version">Download</button>
+    <button id="del" class="pl-btn pl-btn--sm" type="button" title="Delete this artifact">Delete</button>
+  </div>
   <div id="stage">
     <div id="empty">No artifact yet. Ask the agent to render one — a chart, diagram, or widget.</div>
     <iframe id="frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
@@ -252,7 +490,11 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   let kit;
   try { kit = await import(window.__base + "/_ds/plugin-kit.js"); }
   catch (e) { kit = { initPluginView(){}, apiFetch: (p, i) => fetch(window.__base + p, i) }; }
-  var items = [], selId = null, followNewest = true, lastRenderedId = null;
+  // Store mirror: arts = [{id,kind,title,versions:[{code,ts,by}]}], curId = focused.
+  // selId/selVer = the artifact + version the USER is viewing (selVer null = latest, so
+  // it auto-follows new versions). followNewest jumps to the newest artifact on create
+  // unless the user navigated to an older one.
+  var arts = [], curId = null, selId = null, selVer = null, followNewest = true, lastRendered = "";
   var EXT = { html: "html", svg: "svg", mermaid: "mmd", react: "jsx" };
   function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
   // The NESTED artifact iframe (sandboxed, no stylesheet access) gets the live theme
@@ -297,42 +539,72 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
       '<script type="text/babel" data-presets="react">' + code + '<\/script></body>';
     return '<!doctype html>' + base() + '<body style="font-family:sans-serif;padding:16px">unsupported artifact kind</body>';
   }
-  function current(){ for (var i=0;i<items.length;i++) if (items[i].id===selId) return items[i]; return items[0]||null; }
-  function label(it, i){ var t = it.title || (it.kind + " artifact"); return (i===0?"● ":"") + t + "  ·  " + it.kind; }
-  function rebuildSelect(){
-    var sel = document.getElementById("hist"); sel.innerHTML = "";
-    items.forEach(function(it,i){ var o=document.createElement("option"); o.value=it.id; o.textContent=label(it,i); sel.appendChild(o); });
-    if (selId) sel.value = selId;
+  var $art=document.getElementById("art"), $vprev=document.getElementById("vprev"),
+      $vnext=document.getElementById("vnext"), $vlabel=document.getElementById("vlabel"),
+      $dl=document.getElementById("dl"), $del=document.getElementById("del"),
+      $bar=document.getElementById("bar"), $empty=document.getElementById("empty"),
+      $frame=document.getElementById("frame");
+
+  function selArt(){ for(var i=0;i<arts.length;i++) if(arts[i].id===selId) return arts[i]; return arts[0]||null; }
+  function verIdx(a){ // selVer clamped to a's range; null/out-of-range → latest (auto-follow)
+    if(!a) return 0; var n=a.versions.length;
+    return (selVer===null||selVer<0||selVer>n-1) ? n-1 : selVer;
+  }
+  function rebuildArtSelect(){
+    $art.innerHTML="";
+    arts.forEach(function(a){
+      var o=document.createElement("option"); o.value=a.id;
+      o.textContent=(a.id===curId?"● ":"")+(a.title||(a.kind+" artifact"))+"  ·  "+a.kind+"  · v"+a.versions.length;
+      $art.appendChild(o);
+    });
+    var a=selArt(); if(a) $art.value=a.id;
   }
   function render(){
-    var it = current();
-    document.getElementById("bar").style.display = items.length ? "flex" : "none";
-    if (!it || !it.code){ return; }
-    document.getElementById("empty").style.display = "none";
-    if (it.id !== lastRenderedId){
-      lastRenderedId = it.id;
-      var f = document.getElementById("frame");
-      f.srcdoc = srcdoc(it.kind, it.code); f.style.display = "block";
-    }
+    $bar.style.display = arts.length ? "flex" : "none";
+    var a=selArt();
+    if(!a){ $empty.style.display="flex"; $frame.style.display="none"; lastRendered=""; return; }
+    var vi=verIdx(a), v=a.versions[vi];
+    $vlabel.textContent="v"+(vi+1)+"/"+a.versions.length;
+    $vprev.disabled = vi<=0; $vnext.disabled = vi>=a.versions.length-1;
+    $empty.style.display="none";
+    var key=a.id+"@"+vi;  // re-srcdoc only when the shown version actually changes
+    if(key!==lastRendered){ lastRendered=key; $frame.srcdoc=srcdoc(a.kind, v.code); $frame.style.display="block"; }
   }
-  document.getElementById("hist").addEventListener("change", function(e){
-    selId = e.target.value; followNewest = items.length && selId === items[0].id; render();
+
+  $art.addEventListener("change", function(e){
+    selId=e.target.value; selVer=null; followNewest=(selId===(curId||(arts[0]&&arts[0].id)));
+    render();
   });
-  document.getElementById("dl").addEventListener("click", function(){
-    var it = current(); if (!it) return;
-    var blob = new Blob([it.code], { type: "text/plain" });
-    var a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-    a.download = "artifact-" + it.id + "." + (EXT[it.kind] || "txt");
-    document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  $vprev.addEventListener("click", function(){ var a=selArt(); if(!a)return; var vi=verIdx(a);
+    if(vi>0){ selVer=vi-1; followNewest=false; render(); } });
+  $vnext.addEventListener("click", function(){ var a=selArt(); if(!a)return; var vi=verIdx(a);
+    if(vi<a.versions.length-1){ selVer=vi+1; if(selVer===a.versions.length-1) selVer=null; render(); } });
+
+  $dl.addEventListener("click", function(){
+    var a=selArt(); if(!a)return; var vi=verIdx(a), v=a.versions[vi];
+    var blob=new Blob([v.code],{type:"text/plain"}); var u=URL.createObjectURL(blob);
+    var el=document.createElement("a"); el.href=u; el.download="artifact-"+a.id+"-v"+(vi+1)+"."+(EXT[a.kind]||"txt");
+    document.body.appendChild(el); el.click(); el.remove(); setTimeout(function(){URL.revokeObjectURL(u);},1000);
   });
+
+  // Inline two-click confirm (no confirm() — a sandboxed plugin iframe may block modals).
+  var delArm=null, delT=null;
+  $del.addEventListener("click", async function(){
+    var a=selArt(); if(!a)return;
+    if(delArm!==a.id){ delArm=a.id; $del.textContent="Confirm?";
+      clearTimeout(delT); delT=setTimeout(function(){ if(delArm===a.id){delArm=null;$del.textContent="Delete";} },3000); return; }
+    clearTimeout(delT); delArm=null; $del.textContent="Delete";
+    try{ await kit.apiFetch("/api/plugins/artifact/artifact/"+encodeURIComponent(a.id),{method:"DELETE"}); }catch(e){}
+    selId=null; selVer=null; followNewest=true; poll();
+  });
+
   async function poll() {
     if (document.hidden) return;  // don't poll while the window is hidden/minimized (desktop perf)
     try {
       var r = await kit.apiFetch("/api/plugins/artifact/history");
-      var d = await r.json(); items = (d && d.items) || [];
-      if (!items.length) return;
-      if (followNewest || !selId) selId = items[0].id;
-      rebuildSelect(); render();
+      var d = await r.json(); arts = (d && d.artifacts) || []; curId = (d && d.current) || null;
+      if (followNewest) { selId = curId || (arts[0] && arts[0].id) || null; selVer = null; }
+      rebuildArtSelect(); render();
     } catch (e) { /* transient */ }
   }
   // Boot ONCE, on whichever fires first: the handshake (the bearer arrives with
