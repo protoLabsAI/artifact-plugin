@@ -1,6 +1,6 @@
 id: artifact
 name: Artifact
-version: 0.9.0
+version: 0.10.0
 # Needs the host to serve the DS plugin-kit at /_ds/ (protoAgent #893, v0.34.0) —
 # the shell page links it for theming + the authed handshake.
 min_protoagent_version: "0.34.0"
@@ -17,15 +17,21 @@ capabilities:
   filesystem: scoped     # a small artifact history under the instance data dir
 # Operator config (ADR 0019) — `config:` declares the defaults; `settings:` renders the
 # editable fields in Settings ▸ Plugins (no restart; an env var of the same knob still
-# overrides for headless/ACP setups). The numeric tuning caps (history / max_versions /
-# max_code_kb / ask_max_chars) read from config-or-env too but aren't UI fields — the
-# settings schema has no int type.
+# overrides for headless/ACP setups, precedence env > UI > default).
 config:
   ask_enabled: false
   ask_system: ""
+  history: 20
+  max_versions: 50
+  max_code_kb: 512
+  ask_max_chars: 4000
 settings:
   - { key: ask_enabled, label: "Interactive artifacts", type: bool, description: "Let artifacts call back to the agent via window.protoArtifact.ask() — turns them into mini-apps (game NPCs, tutors, generators). Off by default: it lets artifact code trigger LLM calls." }
   - { key: ask_system, label: "Ask system instruction", type: string, description: "Optional system prompt wrapping every window.protoArtifact.ask() call (e.g. a persona or guardrails). Only used when interactive artifacts are on." }
+  - { key: ask_max_chars, label: "Ask prompt limit (chars)", type: number, description: "Max characters for an artifact's ask() prompt." }
+  - { key: history, label: "Artifacts kept", type: number, description: "How many artifacts to keep in the panel; the oldest is evicted past this." }
+  - { key: max_versions, label: "Versions per artifact", type: number, description: "Max edit-versions kept per artifact (oldest edits trimmed)." }
+  - { key: max_code_kb, label: "Max artifact size (KB)", type: number, description: "Max source size per version; a larger render is rejected." }
 # The shell page is PUBLIC (an iframe page-load can't carry a bearer, and the page
 # derives its slug base from /plugins/…); its data routes are gated under
 # /api/plugins/artifact (plugin-view rule 2).

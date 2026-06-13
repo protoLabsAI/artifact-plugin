@@ -209,16 +209,18 @@ def test_config_layer_precedence_env_then_ui_then_default(monkeypatch, tmp_path)
     assert art._max_history() == 3
 
 
-def test_manifest_exposes_ask_settings_fields(monkeypatch, tmp_path):
+def test_manifest_exposes_all_settings_fields(monkeypatch, tmp_path):
     import yaml
 
     m = yaml.safe_load((ROOT / "protoagent.plugin.yaml").read_text())
-    keys = {f["key"] for f in m.get("settings", [])}
-    assert (
-        "ask_enabled" in keys and "ask_system" in keys
-    )  # surfaced in Settings ▸ Plugins
-    enabled = next(f for f in m["settings"] if f["key"] == "ask_enabled")
-    assert enabled["type"] == "bool"
+    by_key = {f["key"]: f for f in m.get("settings", [])}
+    # every operator knob is a Settings ▸ Plugins field, with the right type.
+    assert by_key["ask_enabled"]["type"] == "bool"
+    assert by_key["ask_system"]["type"] == "string"
+    for num in ("ask_max_chars", "history", "max_versions", "max_code_kb"):
+        assert by_key[num]["type"] == "number", f"{num} should be a number field"
+    # every settings key has a declared default in config:.
+    assert set(by_key) <= set(m["config"])
     assert m["config"]["ask_enabled"] is False  # default off
 
 

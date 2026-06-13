@@ -48,16 +48,13 @@ environment variable of the same knob overrides the UI for headless / ACP setups
 |---|---|---|---|
 | **Interactive artifacts** | `ARTIFACT_ASK_ENABLED` | _off_ | Let artifacts call back to the agent via `window.protoArtifact.ask()` (below). |
 | **Ask system instruction** | `ARTIFACT_ASK_SYSTEM` | _(none)_ | Optional system prompt wrapping every `ask()`. |
+| **Ask prompt limit (chars)** | `ARTIFACT_ASK_MAX_CHARS` | `4000` | Max prompt length for an `ask()`. |
+| **Artifacts kept** | `ARTIFACT_HISTORY` | `20` | How many artifacts to keep (oldest evicted). |
+| **Versions per artifact** | `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed). |
+| **Max artifact size (KB)** | `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version (a larger render is rejected). |
 
-Numeric tuning caps are config-or-env only (no UI field — the settings schema has no `int` type):
-
-| Knob | Env | Default | What |
-|---|---|---|---|
-| history | `ARTIFACT_HISTORY` | `20` | How many artifacts to keep (oldest evicted). |
-| max_versions | `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed). |
-| max_code_kb | `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version (a larger render is rejected). |
-| ask_max_chars | `ARTIFACT_ASK_MAX_CHARS` | `4000` | Max prompt length for an `ask()`. |
-| — | `ARTIFACT_DIR` | `~/.protoagent/artifact` | Where state is stored (instance-scoped by `PROTOAGENT_INSTANCE`). |
+`ARTIFACT_DIR` (`~/.protoagent/artifact`) is env-only — where state is stored (instance-scoped by
+`PROTOAGENT_INSTANCE`).
 
 ## Interactive artifacts (calling back to the agent)
 
