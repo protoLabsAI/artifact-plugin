@@ -176,3 +176,16 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     # listener (hex survives ONLY as `var(--pl-color-…, #fallback)` defaults).
     assert ":root{" not in html and ":root {" not in html
     assert 'addEventListener("message"' not in html
+
+
+def test_every_cdn_script_is_pinned_with_sri(monkeypatch, tmp_path):
+    """No external CDN lib loads unpinned: every cdnjs URL is paired with an SRI hash,
+    and the tag builder emits integrity + crossorigin. Guards against an unpinned
+    `<script src=…>` sneaking back in (supply-chain / tamper)."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    n_urls = html.count("https://cdnjs.cloudflare.com")
+    n_sri = html.count("sha512-") + html.count("sha384-")
+    assert n_urls == 4 and n_sri == 4, (
+        f"{n_urls} CDN urls vs {n_sri} SRI hashes — every CDN lib must be pinned"
+    )
+    assert 'integrity="' in html and 'crossorigin="anonymous"' in html

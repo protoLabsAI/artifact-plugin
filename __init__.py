@@ -229,16 +229,32 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     var fg = (cs.getPropertyValue("--pl-color-fg") || "#ededed").trim();
     return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>';
   }
+  // Pinned CDN libs WITH Subresource Integrity. The artifact sandbox already has no
+  // same-origin (a compromised script can't reach the console), but SRI also closes
+  // the supply-chain/tamper vector: a CDN file that doesn't match the hash won't
+  // execute. crossorigin="anonymous" is required for SRI on cross-origin scripts
+  // (cdnjs sends Access-Control-Allow-Origin: *). Bump the version AND the hash
+  // together — hashes are from api.cdnjs.com/libraries/<lib>/<version>?fields=sri.
+  var CDN = {
+    mermaid: ["https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js",
+      "sha512-6a80OTZVmEJhqYJUmYd5z8yHUCDlYnj6q9XwB/gKOEyNQV/Q8u+XeSG59a2ZKFEHGTYzgfOQKYEBtrZV7vBr+Q=="],
+    react: ["https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js",
+      "sha512-QVs8Lo43F9lSuBykadDb0oSXDL/BbZ588urWVCRwSIoewQv/Ewg1f84mK3U790bZ0FfhFa1YSQUmIhG+pIRKeg=="],
+    reactDom: ["https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js",
+      "sha512-6a1107rTlA4gYpgHAqbwLAtxmWipBdJFcq8y5S/aTge3Bp+VAklABm2LO+Kg51vOWR9JMZq1Ovjl5tpluNpTeQ=="],
+    babel: ["https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js",
+      "sha512-bAHF//mCdqGSgyUBqhtDgaGLxsraipURsQRGG+3uNncZdsFA6/283u21SOwB6rzINUXSATUMoZaXm4IaV2Lw2Q=="],
+  };
+  function cdn(name){ var c = CDN[name];
+    return '<script crossorigin="anonymous" integrity="' + c[1] + '" src="' + c[0] + '"><\/script>'; }
   function srcdoc(kind, code) {
     if (kind === "html") return base() + code;
     if (kind === "svg") return '<!doctype html>' + base() + '<body style="display:grid;place-items:center;min-height:100vh">' + code + '</body>';
     if (kind === "mermaid") return '<!doctype html>' + base() + '<body><pre class="mermaid">' + esc(code) + '</pre>' +
-      '<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"><\/script>' +
+      cdn("mermaid") +
       '<script>mermaid.initialize({startOnLoad:false,theme:"dark"});mermaid.run();<\/script></body>';
     if (kind === "react") return '<!doctype html>' + base() + '<body><div id="root"></div>' +
-      '<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"><\/script>' +
-      '<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"><\/script>' +
-      '<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"><\/script>' +
+      cdn("react") + cdn("reactDom") + cdn("babel") +
       '<script type="text/babel" data-presets="react">' + code + '<\/script></body>';
     return '<!doctype html>' + base() + '<body style="font-family:sans-serif;padding:16px">unsupported artifact kind</body>';
   }
