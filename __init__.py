@@ -41,42 +41,79 @@ _VENDOR_FILES = {
 }
 
 
-# Keep the last N artifacts (ARTIFACT_HISTORY overrides) so the user can revisit + download past
-# renders, not just the latest. A bad env value must not crash plugin load — fall back to 20.
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
+# ── config ───────────────────────────────────────────────────────────────────
+# Read live from the host's plugin config (the manifest `settings:` block, ADR 0019 —
+# editable in Settings ▸ Plugins, persisted, no restart) with an env-var override and
+# a literal default. Precedence: explicit ENV > UI/config > default. config() reads the
+# LIVE config each call, so a Settings save takes effect immediately; under ACP (no
+# graph state in the tool process) it falls back to env/default.
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def _plugin_cfg() -> dict:
     try:
-        return max(minimum, int(os.environ.get(name, "") or default))
-    except (TypeError, ValueError):
-        log.warning("[artifact] %s is not an integer — using %d", name, default)
-        return default
+        from graph.sdk import config
+
+        return (getattr(config(), "plugin_config", {}) or {}).get("artifact", {}) or {}
+    except Exception:  # noqa: BLE001 — no host (tests) / not yet loaded → env+default
+        return {}
 
 
-_MAX_HISTORY = _env_int("ARTIFACT_HISTORY", 20)
-
-# Cap a single artifact's source so one runaway render can't bloat history.json (the
-# whole history is read+rewritten on every render). ~512 KB is generous for hand- or
-# model-written HTML/SVG/React; override with ARTIFACT_MAX_CODE_KB.
-_MAX_CODE_BYTES = _env_int("ARTIFACT_MAX_CODE_KB", 512) * 1024
-
-
-# Per-artifact version cap — an artifact is a chain of edits (Claude-style versions);
-# keep the tail bounded so a long edit session can't grow history.json without limit.
-_MAX_VERSIONS = _env_int("ARTIFACT_MAX_VERSIONS", 50)
-
-# Interactive artifacts (the window.protoArtifact.ask bridge → the agent) let
-# sandboxed artifact code trigger LLM calls, which is a cost/abuse surface — so it's
-# OPT-IN: ARTIFACT_ASK_ENABLED must be truthy. ARTIFACT_ASK_MAX_CHARS caps a prompt;
-# ARTIFACT_ASK_SYSTEM is an optional system instruction wrapping every ask.
-_ASK_MAX_CHARS = _env_int("ARTIFACT_ASK_MAX_CHARS", 4000)
+def _cfg_bool(key: str, env: str) -> bool:
+    e = os.environ.get(env)
+    if e:
+        return e.strip().lower() in _TRUE
+    v = _plugin_cfg().get(key)
+    if isinstance(v, bool):
+        return v
+    return v not in (None, "") and str(v).strip().lower() in _TRUE
 
 
+def _cfg_str(key: str, env: str, default: str = "") -> str:
+    e = os.environ.get(env)
+    if e:
+        return e
+    v = _plugin_cfg().get(key)
+    return str(v) if v not in (None, "") else default
+
+
+def _cfg_int(key: str, env: str, default: int, minimum: int = 1) -> int:
+    for raw in (os.environ.get(env, ""), _plugin_cfg().get(key)):
+        if raw not in (None, ""):
+            try:
+                return max(minimum, int(raw))
+            except (TypeError, ValueError):
+                pass  # bad value → try the next source, never crash
+    return default
+
+
+# History/version/size caps (config or env; not UI fields — numeric, and the settings
+# schema has no int type). Read live via functions so a config change applies at once.
+def _max_history() -> int:
+    return _cfg_int("history", "ARTIFACT_HISTORY", 20)
+
+
+def _max_versions() -> int:
+    return _cfg_int("max_versions", "ARTIFACT_MAX_VERSIONS", 50)
+
+
+def _max_code_bytes() -> int:
+    return _cfg_int("max_code_kb", "ARTIFACT_MAX_CODE_KB", 512) * 1024
+
+
+# Interactive artifacts (window.protoArtifact.ask → the agent). OPT-IN: letting
+# sandboxed artifact code trigger LLM calls is a cost surface. `ask_enabled` +
+# `ask_system` are Settings ▸ Plugins fields (manifest `settings:`); ask_max_chars caps.
 def _ask_enabled() -> bool:
-    return os.environ.get("ARTIFACT_ASK_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return _cfg_bool("ask_enabled", "ARTIFACT_ASK_ENABLED")
+
+
+def _ask_system() -> str | None:
+    return _cfg_str("ask_system", "ARTIFACT_ASK_SYSTEM") or None
+
+
+def _ask_max_chars() -> int:
+    return _cfg_int("ask_max_chars", "ARTIFACT_ASK_MAX_CHARS", 4000)
 
 
 # ── the store ──────────────────────────────────────────────────────────────────
@@ -142,10 +179,11 @@ def _read_store() -> dict:
 
 
 def _write_store(store: dict) -> None:
-    store["artifacts"] = store.get("artifacts", [])[:_MAX_HISTORY]
+    max_versions = _max_versions()
+    store["artifacts"] = store.get("artifacts", [])[: _max_history()]
     for a in store["artifacts"]:
-        if len(a.get("versions", [])) > _MAX_VERSIONS:
-            a["versions"] = a["versions"][-_MAX_VERSIONS:]
+        if len(a.get("versions", [])) > max_versions:
+            a["versions"] = a["versions"][-max_versions:]
     path = _store_path()
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
@@ -162,11 +200,12 @@ def _find(store: dict, art_id: str | None) -> dict | None:
 
 
 def _too_big(code: str) -> str | None:
-    if len(code.encode("utf-8")) > _MAX_CODE_BYTES:
+    limit = _max_code_bytes()
+    if len(code.encode("utf-8")) > limit:
         return (
             f"Artifact too large ({len(code.encode('utf-8')) // 1024} KB > "
-            f"{_MAX_CODE_BYTES // 1024} KB). Trim the source or split it; raise "
-            f"ARTIFACT_MAX_CODE_KB if you really need more."
+            f"{limit // 1024} KB). Trim the source or split it; raise "
+            f"the artifact max_code_kb setting if you really need more."
         )
     return None
 
@@ -428,8 +467,9 @@ def _build_data_router():
         prompt = str(body.get("prompt", "")).strip()
         if not prompt:
             raise HTTPException(400, "prompt required")
-        if len(prompt) > _ASK_MAX_CHARS:
-            raise HTTPException(413, f"prompt too long (> {_ASK_MAX_CHARS} chars)")
+        cap = _ask_max_chars()
+        if len(prompt) > cap:
+            raise HTTPException(413, f"prompt too long (> {cap} chars)")
         try:
             from graph.sdk import complete  # ADR 0043 consumption SDK
         except Exception:  # noqa: BLE001
@@ -439,9 +479,7 @@ def _build_data_router():
                 "(needs graph.sdk.complete — upgrade the host).",
             ) from None
         try:
-            text = await complete(
-                prompt, system=os.environ.get("ARTIFACT_ASK_SYSTEM") or None
-            )
+            text = await complete(prompt, system=_ask_system())
         except Exception as e:  # noqa: BLE001
             log.warning("[artifact] ask completion failed", exc_info=True)
             raise HTTPException(502, f"completion failed: {e}") from None

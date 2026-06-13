@@ -182,10 +182,44 @@ def test_legacy_flat_history_migrates_to_versioned(monkeypatch, tmp_path):
     assert store["current"] == "old1"
 
 
-def test_bad_history_env_does_not_crash_load(monkeypatch, tmp_path):
+def test_bad_history_env_falls_back_to_default(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_HISTORY", "not-a-number")
     art = _load(monkeypatch, tmp_path)  # must not raise at import
-    assert art._MAX_HISTORY == 20  # fell back to the default
+    assert art._max_history() == 20  # bad value → default, never crashes
+
+
+def test_config_layer_precedence_env_then_ui_then_default(monkeypatch, tmp_path):
+    """A knob reads: explicit ENV > the host's plugin config (Settings ▸ Plugins) >
+    literal default — so the UI toggle works and an env var still overrides it."""
+    art = _load(monkeypatch, tmp_path)
+
+    # default (no env, no host config — _plugin_cfg() returns {} without a host).
+    assert art._ask_enabled() is False
+    assert art._max_history() == 20
+
+    # host/UI config drives it (simulate Settings ▸ Plugins → artifact.ask_enabled).
+    monkeypatch.setattr(art, "_plugin_cfg", lambda: {"ask_enabled": True, "history": 7})
+    assert art._ask_enabled() is True
+    assert art._max_history() == 7
+
+    # an explicit env var OVERRIDES the UI config (headless / ACP escape hatch).
+    monkeypatch.setenv("ARTIFACT_ASK_ENABLED", "0")  # env wins → off despite UI True
+    monkeypatch.setenv("ARTIFACT_HISTORY", "3")
+    assert art._ask_enabled() is False
+    assert art._max_history() == 3
+
+
+def test_manifest_exposes_ask_settings_fields(monkeypatch, tmp_path):
+    import yaml
+
+    m = yaml.safe_load((ROOT / "protoagent.plugin.yaml").read_text())
+    keys = {f["key"] for f in m.get("settings", [])}
+    assert (
+        "ask_enabled" in keys and "ask_system" in keys
+    )  # surfaced in Settings ▸ Plugins
+    enabled = next(f for f in m["settings"] if f["key"] == "ask_enabled")
+    assert enabled["type"] == "bool"
+    assert m["config"]["ask_enabled"] is False  # default off
 
 
 def test_corrupt_store_file_reads_as_empty(monkeypatch, tmp_path):
