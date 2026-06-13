@@ -30,7 +30,9 @@ console view.
   - `rewrite_artifact(code, title?, artifact_id?)` — **full replace** → new version.
   - `list_artifacts()` / `delete_artifact(artifact_id)` — manage them.
 - **View** "Artifact" (right rail) — a sandboxed renderer with an **artifact picker**, **version
-  navigation** (step back/forward through edits), **download** (this version), and **delete**.
+  navigation** (step back/forward through edits), an **in-panel code editor** (edit the source and
+  *Run & save* → a new `user` version, never overwriting the agent's), **download** (this version),
+  and **delete**.
 - **Events** `artifact.created` / `artifact.updated` / `artifact.deleted` (ADR 0039) — broadcast on
   the bus so the console lights the Artifact rail icon even when the panel is closed.
 - **Skill** `rendering-artifacts` — teaches render-don't-write-files and the edit-don't-recreate

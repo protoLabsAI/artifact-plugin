@@ -265,6 +265,36 @@ def test_delete_route_removes_the_artifact(monkeypatch, tmp_path):
     assert c.delete("/api/plugins/artifact/artifact/nope").status_code == 404
 
 
+def test_put_route_saves_a_user_edit_as_a_new_version(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    art = _load(monkeypatch, tmp_path)
+    c = TestClient(_app(art))
+    art.show_artifact.invoke({"kind": "html", "code": "<p>v1</p>"})
+    aid = art._read_store()["artifacts"][0]["id"]
+    r = c.put(
+        f"/api/plugins/artifact/artifact/{aid}", json={"code": "<p>v2 by user</p>"}
+    )
+    assert r.status_code == 200 and r.json()["version"] == 2
+    a = art._read_store()["artifacts"][0]
+    assert a["versions"][-1] == {
+        **a["versions"][-1],
+        "code": "<p>v2 by user</p>",
+        "by": "user",
+    }
+    assert a["versions"][0]["code"] == "<p>v1</p>"  # agent's v1 preserved (no clobber)
+    # unknown id → 404; oversize → 413.
+    assert (
+        c.put("/api/plugins/artifact/artifact/nope", json={"code": "x"}).status_code
+        == 404
+    )
+    monkeypatch.setenv("ARTIFACT_MAX_CODE_KB", "1")
+    art2 = _load(monkeypatch, tmp_path)
+    c2 = TestClient(_app(art2))
+    big = c2.put(f"/api/plugins/artifact/artifact/{aid}", json={"code": "x" * 2048})
+    assert big.status_code == 413
+
+
 def test_manifest_view_path_matches_the_served_public_route(monkeypatch, tmp_path):
     import yaml
 
