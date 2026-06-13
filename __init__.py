@@ -63,6 +63,21 @@ _MAX_CODE_BYTES = _env_int("ARTIFACT_MAX_CODE_KB", 512) * 1024
 # keep the tail bounded so a long edit session can't grow history.json without limit.
 _MAX_VERSIONS = _env_int("ARTIFACT_MAX_VERSIONS", 50)
 
+# Interactive artifacts (the window.protoArtifact.ask bridge → the agent) let
+# sandboxed artifact code trigger LLM calls, which is a cost/abuse surface — so it's
+# OPT-IN: ARTIFACT_ASK_ENABLED must be truthy. ARTIFACT_ASK_MAX_CHARS caps a prompt;
+# ARTIFACT_ASK_SYSTEM is an optional system instruction wrapping every ask.
+_ASK_MAX_CHARS = _env_int("ARTIFACT_ASK_MAX_CHARS", 4000)
+
+
+def _ask_enabled() -> bool:
+    return os.environ.get("ARTIFACT_ASK_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 
 # ── the store ──────────────────────────────────────────────────────────────────
 # An artifact is a VERSION CHAIN: {id, kind, title, versions:[{code, ts, by}], …}.
@@ -397,6 +412,41 @@ def _build_data_router():
         artifact picker + version navigation."""
         return _read_store()
 
+    @router.post("/ask")
+    async def _ask(body: dict = Body(...)) -> dict:
+        """Interactive bridge: a sandboxed artifact's ``window.protoArtifact.ask(prompt)``
+        reaches the agent here (the ``window.claude.complete`` analog). OPT-IN
+        (``ARTIFACT_ASK_ENABLED``) — letting artifact code trigger LLM calls is a
+        cost/abuse surface. Gated by the operator bearer like the rest. Runs a BARE
+        completion (no tools/agent loop) via the consumption SDK."""
+        if not _ask_enabled():
+            raise HTTPException(
+                403,
+                "Artifact 'ask' is disabled — set ARTIFACT_ASK_ENABLED=1 to let "
+                "artifacts call the agent.",
+            )
+        prompt = str(body.get("prompt", "")).strip()
+        if not prompt:
+            raise HTTPException(400, "prompt required")
+        if len(prompt) > _ASK_MAX_CHARS:
+            raise HTTPException(413, f"prompt too long (> {_ASK_MAX_CHARS} chars)")
+        try:
+            from graph.sdk import complete  # ADR 0043 consumption SDK
+        except Exception:  # noqa: BLE001
+            raise HTTPException(
+                501,
+                "This protoAgent build doesn't support artifact ask "
+                "(needs graph.sdk.complete — upgrade the host).",
+            ) from None
+        try:
+            text = await complete(
+                prompt, system=os.environ.get("ARTIFACT_ASK_SYSTEM") or None
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("[artifact] ask completion failed", exc_info=True)
+            raise HTTPException(502, f"completion failed: {e}") from None
+        return {"text": text}
+
     @router.put("/artifact/{art_id}")
     async def _save_edit(art_id: str, body: dict = Body(...)) -> dict:
         """Save a USER edit (the panel's in-panel code editor) as a new version. Like the
@@ -538,11 +588,23 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
   // The NESTED artifact iframe (sandboxed, no stylesheet access) gets the live theme
   // injected as literal colors — read the kit-managed tokens at render time.
+  // Injected into EVERY artifact (the window.claude.complete analog): the artifact
+  // calls window.protoArtifact.ask(prompt) → a Promise that round-trips via the shell
+  // (postMessage) to the gated /ask endpoint → the agent → back. parent.postMessage
+  // works from the sandbox; the shell validates e.source and calls the bearer-gated
+  // endpoint. ask() rejects if the operator hasn't enabled it (ARTIFACT_ASK_ENABLED).
+  var SHIM = '<script>(function(){var s=0,w={};'
+    + 'window.addEventListener("message",function(e){var m=e.data||{};if(m.type!=="protoArtifact:result")return;'
+    + 'var p=w[m.id];if(!p)return;delete w[m.id];m.error?p.reject(new Error(m.error)):p.resolve(m.text);});'
+    + 'window.protoArtifact={ask:function(prompt){return new Promise(function(res,rej){var id=++s;w[id]={resolve:res,reject:rej};'
+    + 'parent.postMessage({type:"protoArtifact:ask",id:id,prompt:String(prompt)},"*");'
+    + 'setTimeout(function(){if(w[id]){delete w[id];rej(new Error("ask timed out"));}},60000);});}};'
+    + '})();<\/script>';
   function base(){
     var cs = getComputedStyle(document.documentElement);
     var bg = (cs.getPropertyValue("--pl-color-bg") || "#0a0a0c").trim();
     var fg = (cs.getPropertyValue("--pl-color-fg") || "#ededed").trim();
-    return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>';
+    return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>' + SHIM;
   }
   // Artifact libs are VENDORED + served same-origin (/plugins/artifact/vendor/…), so
   // react/mermaid renders work fully OFFLINE — no cdnjs dependency. Still pinned with
@@ -662,6 +724,22 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
       followNewest=true; await poll(); exitEdit();   // show the just-saved new version
     }catch(e){ $estat.textContent="Save failed"; }
     $run.disabled=false;
+  });
+
+  // Agent-callback bridge: an artifact's window.protoArtifact.ask(prompt) posts here;
+  // we call the bearer-gated /ask endpoint (a bare agent completion) and post the
+  // answer back INTO the artifact frame. e.source-guarded to only our artifact frame —
+  // the kit's own protoagent:init handshake messages are ignored here.
+  window.addEventListener("message", async function(e){
+    if(!$frame || e.source!==$frame.contentWindow) return;
+    var m=e.data||{}; if(m.type!=="protoArtifact:ask") return;
+    function reply(p){ try{ $frame.contentWindow.postMessage(Object.assign({type:"protoArtifact:result",id:m.id},p),"*"); }catch(_){} }
+    try{
+      var r=await kit.apiFetch("/api/plugins/artifact/ask",
+        {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({prompt:m.prompt})});
+      if(!r.ok){ var t=""; try{ t=await r.text(); }catch(_){} reply({error:("ask failed ("+r.status+") "+t).slice(0,300)}); return; }
+      var d=await r.json(); reply({text:(d&&d.text)||""});
+    }catch(err){ reply({error:String(err).slice(0,300)}); }
   });
 
   async function poll() {

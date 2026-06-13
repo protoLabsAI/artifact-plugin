@@ -295,6 +295,51 @@ def test_put_route_saves_a_user_edit_as_a_new_version(monkeypatch, tmp_path):
     assert big.status_code == 413
 
 
+def test_ask_route_is_opt_in_and_validates(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    from fastapi.testclient import TestClient
+
+    art = _load(monkeypatch, tmp_path)
+    c = TestClient(_app(art))
+    # Disabled by default → 403 (letting artifact code call the LLM is opt-in).
+    monkeypatch.delenv("ARTIFACT_ASK_ENABLED", raising=False)
+    assert c.post("/api/plugins/artifact/ask", json={"prompt": "hi"}).status_code == 403
+
+    # Enabled: stub graph.sdk.complete (the host SDK isn't importable in the test env).
+    monkeypatch.setenv("ARTIFACT_ASK_ENABLED", "1")
+    captured = {}
+
+    async def _fake_complete(prompt, *, system=None, model_name=None):
+        captured["prompt"], captured["system"] = prompt, system
+        return "agent says hi"
+
+    fake = types.ModuleType("graph.sdk")
+    fake.complete = _fake_complete
+    monkeypatch.setitem(sys.modules, "graph", types.ModuleType("graph"))
+    monkeypatch.setitem(sys.modules, "graph.sdk", fake)
+    monkeypatch.setenv("ARTIFACT_ASK_SYSTEM", "be terse")
+
+    r = c.post("/api/plugins/artifact/ask", json={"prompt": "  ping  "})
+    assert r.status_code == 200 and r.json()["text"] == "agent says hi"
+    assert captured == {
+        "prompt": "ping",
+        "system": "be terse",
+    }  # trimmed + system passed
+
+    assert c.post("/api/plugins/artifact/ask", json={"prompt": ""}).status_code == 400
+    monkeypatch.setenv("ARTIFACT_ASK_MAX_CHARS", "5")
+    art2 = _load(monkeypatch, tmp_path)
+    c2 = TestClient(_app(art2))
+    assert (
+        c2.post(
+            "/api/plugins/artifact/ask", json={"prompt": "way too long"}
+        ).status_code
+        == 413
+    )
+
+
 def test_manifest_view_path_matches_the_served_public_route(monkeypatch, tmp_path):
     import yaml
 
@@ -323,10 +368,23 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     # nested artifact frame stays sandboxed with NO same-origin (the isolation model).
     assert 'sandbox="allow-scripts"' in html
     assert "allow-same-origin" not in html
-    # The kit owns theming: no hand-rolled :root theme map, no bespoke handshake
-    # listener (hex survives ONLY as `var(--pl-color-…, #fallback)` defaults).
+    # The kit owns the protoagent:init THEME handshake — the page must not hand-roll
+    # it (hex survives ONLY as `var(--pl-color-…, #fallback)` defaults). NB the page
+    # DOES carry a message listener now — the agent-ask bridge, a different concern.
     assert ":root{" not in html and ":root {" not in html
-    assert 'addEventListener("message"' not in html
+    assert "kit.initPluginView" in html  # kit owns theming, not a bespoke listener
+    assert "applyTheme" not in html  # the pre-kit hand-rolled theme fn is gone
+
+
+def test_ask_bridge_is_wired(monkeypatch, tmp_path):
+    """The window.protoArtifact.ask shim is injected into artifacts and the shell
+    relays it to the gated /ask endpoint (the agent-callback bridge)."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    assert "window.protoArtifact" in html and "protoArtifact:ask" in html
+    assert "protoArtifact:result" in html
+    assert 'apiFetch("/api/plugins/artifact/ask"' in html
+    # the shell only relays messages from its own artifact frame.
+    assert "e.source!==$frame.contentWindow" in html
 
 
 def test_libs_are_vendored_same_origin_not_cdn(monkeypatch, tmp_path):
