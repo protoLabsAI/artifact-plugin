@@ -131,49 +131,56 @@ def register(registry) -> None:
 # The shell page (ADR 0026 iframe). It takes the operator bearer via the console's postMessage
 # handshake, polls /current, and renders each new artifact into a NESTED sandboxed iframe. The
 # nested frame is sandbox="allow-scripts" with NO allow-same-origin — generated code is isolated.
-_SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
-  :root{ --bg:#0a0a0c; --fg:#ededed; --fg-muted:#9aa0aa; --border:#2a2a30; }
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg-muted);
-    font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+_SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
+<script>
+  // Slug-aware base (protoAgent ADR 0042, plugin-view rule 3) computed FIRST — the
+  // kit's own <link> loads before the kit exists, so it's base-prefixed by hand.
+  window.__base = location.pathname.split("/plugins/")[0];
+  document.write('<link rel="stylesheet" href="' + window.__base + '/_ds/plugin-kit.css">');
+</script>
+<style>
+  /* Layout only — colors/typography come from plugin-kit.css's --pl-* tokens, which
+     plugin-kit.js re-skins to the operator's live theme (dark fallbacks, no flash). */
+  html,body{margin:0;height:100%;background:var(--pl-color-bg,#0a0a0c);color:var(--pl-color-fg-muted,#9aa0aa);
+    font-family:var(--pl-font-sans,ui-sans-serif,system-ui,sans-serif)}
   #wrap{display:flex;flex-direction:column;height:100%}
   /* Toolbar: history picker + download. Hidden until there's at least one artifact. */
-  #bar{display:none;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px}
-  #bar select{flex:1;min-width:0;background:transparent;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:12px}
-  #bar button{background:transparent;color:var(--fg-muted);border:1px solid var(--border);border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px}
+  #bar{display:none;align-items:center;gap:8px;padding:6px 10px;
+    border-bottom:var(--pl-border-width,1px) solid var(--pl-color-border,#2a2a30);font-size:12px}
+  #bar select{flex:1;min-width:0}
   #stage{flex:1;min-height:0;position:relative}
   #empty{display:flex;align-items:center;justify-content:center;height:100%;text-align:center;padding:24px;font-size:14px}
-  /* No white flash — the artifact frame defaults to the console's dark ground (ADR 0038). */
-  #frame{border:0;width:100%;height:100%;display:none;background:var(--bg)}
+  /* No white flash — the artifact frame defaults to the console's ground (ADR 0038). */
+  #frame{border:0;width:100%;height:100%;display:none;background:var(--pl-color-bg,#0a0a0c)}
 </style></head><body>
 <div id="wrap">
-  <div id="bar"><select id="hist"></select><button id="dl" type="button" title="Download this artifact">Download</button></div>
+  <div id="bar"><select id="hist" class="pl-input"></select><button id="dl" class="pl-btn pl-btn--sm" type="button" title="Download this artifact">Download</button></div>
   <div id="stage">
     <div id="empty">No artifact yet. Ask the agent to render one — a chart, diagram, or widget.</div>
     <iframe id="frame" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe>
   </div>
 </div>
-<script>
-  var token = null, items = [], selId = null, followNewest = true, lastRenderedId = null;
-  // Slug-aware base (protoAgent ADR 0042, plugin-view rule 3): the iframe loads at
-  // /plugins/artifact/view on the host window but /agents/<slug>/plugins/artifact/view
-  // through the fleet proxy — a hardcoded "/api/..." there would fetch the HUB agent's
-  // artifact history, never this agent's. Prefix every data fetch.
-  var BASE = location.pathname.split("/plugins/")[0];
-  // Theme follows the console (ADR 0026 bridge). Dark fallbacks so we never flash white.
-  var theme = { bg: "#0a0a0c", fg: "#ededed", fgMuted: "#9aa0aa" };
+<script type="module">
+  // The DS plugin-kit owns the protoagent:init handshake (bearer + theme, incl. live
+  // re-themes onto the --pl-* tokens) and slug-aware authed fetches — replacing the
+  // hand-rolled listener/theme map this page carried. plugin-kit.js is an ES MODULE,
+  // so it loads via dynamic import (a classic <script src> throws on its exports;
+  // see protoAgent docs/how-to/build-a-plugin-view.md). Older host without /_ds:
+  // fall back to a tokenless same-origin shim.
+  let kit;
+  try { kit = await import(window.__base + "/_ds/plugin-kit.js"); }
+  catch (e) { kit = { initPluginView(){}, apiFetch: (p, i) => fetch(window.__base + p, i) }; }
+  var items = [], selId = null, followNewest = true, lastRenderedId = null;
   var EXT = { html: "html", svg: "svg", mermaid: "mmd", react: "jsx" };
-  window.addEventListener("message", function (e) {
-    var m = e.data || {}; if (m.type !== "protoagent:init") return;
-    token = m.token || null;
-    if (m.theme) {
-      theme = { bg: m.theme.bg || theme.bg, fg: m.theme.fg || theme.fg, fgMuted: m.theme.fgMuted || theme.fgMuted };
-      var r = document.documentElement.style;
-      r.setProperty("--bg", theme.bg); r.setProperty("--fg", theme.fg); r.setProperty("--fg-muted", theme.fgMuted);
-      if (m.theme.border) r.setProperty("--border", m.theme.border);
-    }
-  });
   function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
-  function base(){ return '<style>html,body{margin:0;background:' + theme.bg + ';color:' + theme.fg + '}</style>'; }
+  // The NESTED artifact iframe (sandboxed, no stylesheet access) gets the live theme
+  // injected as literal colors — read the kit-managed tokens at render time.
+  function base(){
+    var cs = getComputedStyle(document.documentElement);
+    var bg = (cs.getPropertyValue("--pl-color-bg") || "#0a0a0c").trim();
+    var fg = (cs.getPropertyValue("--pl-color-fg") || "#ededed").trim();
+    return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>';
+  }
   function srcdoc(kind, code) {
     if (kind === "html") return base() + code;
     if (kind === "svg") return '<!doctype html>' + base() + '<body style="display:grid;place-items:center;min-height:100vh">' + code + '</body>';
@@ -218,13 +225,19 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8"><style>
   async function poll() {
     if (document.hidden) return;  // don't poll while the window is hidden/minimized (desktop perf)
     try {
-      var r = await fetch(BASE + "/api/plugins/artifact/history", { headers: token ? { Authorization: "Bearer " + token } : {} });
+      var r = await kit.apiFetch("/api/plugins/artifact/history");
       var d = await r.json(); items = (d && d.items) || [];
       if (!items.length) return;
       if (followNewest || !selId) selId = items[0].id;
       rebuildSelect(); render();
     } catch (e) { /* transient */ }
   }
-  setInterval(poll, 1500); poll();
-  document.addEventListener("visibilitychange", function(){ if(!document.hidden) poll(); }); // refresh on return
+  // Boot ONCE, on whichever fires first: the handshake (the bearer arrives with
+  // protoagent:init, so the gated history poll authenticates) or a short timer
+  // for the no-handshake case (standalone page / older host).
+  var booted = false;
+  function boot(){ if (booted) return; booted = true; poll(); setInterval(poll, 1500); }
+  kit.initPluginView(boot);
+  setTimeout(boot, 800);
+  document.addEventListener("visibilitychange", function(){ if(!document.hidden && booted) poll(); }); // refresh on return
 </script></body></html>"""
