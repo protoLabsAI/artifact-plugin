@@ -46,6 +46,19 @@ never destroying the previous version. Both default to the most-recent artifact;
 - **`delete_artifact(artifact_id)`** — remove one for cleanup. (The user can also delete from the
   panel's trash button.)
 
+## Interactive artifacts (calling back to you)
+
+`html` and `react` artifacts can call **`window.protoArtifact.ask(prompt)`** — it returns a
+Promise resolving to *your* answer — so an artifact can be a live mini-app (a game NPC, a tutor,
+a generator). Use it when the user asks for something that needs intelligence *inside* the widget:
+
+```js
+const line = await window.protoArtifact.ask("Greet the player as a grumpy dwarf, one line.");
+```
+
+It only works if the operator set `ARTIFACT_ASK_ENABLED` — if it's off, `ask()` rejects with a
+message telling them how to enable it, so write artifacts that degrade gracefully.
+
 ## When to still write files
 
 Only when the user explicitly wants a **project / files** ("scaffold a repo", "write the component

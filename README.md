@@ -46,13 +46,35 @@ console view.
 | `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed) — bounds a long edit session. |
 | `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version; a larger render is rejected with a message (keeps `history.json` bounded). |
 | `ARTIFACT_DIR` | `~/.protoagent/artifact` | Where history is stored (instance-scoped by `PROTOAGENT_INSTANCE`). |
+| `ARTIFACT_ASK_ENABLED` | _(off)_ | Opt-in: let artifacts call back to the agent via `window.protoArtifact.ask()` (below). |
+| `ARTIFACT_ASK_MAX_CHARS` | `4000` | Max prompt length for an `ask()`. |
+| `ARTIFACT_ASK_SYSTEM` | _(none)_ | Optional system instruction wrapping every `ask()`. |
+
+## Interactive artifacts (calling back to the agent)
+
+Every artifact gets a **`window.protoArtifact.ask(prompt)`** helper — the
+[`window.claude.complete`](https://claude.com/blog/claude-powered-artifacts) analog. It returns a
+Promise that resolves to the agent's answer, so an artifact can be a mini-app — an AI game NPC, a
+tutor, a content generator:
+
+```js
+const reply = await window.protoArtifact.ask("Give the NPC a gruff one-line greeting.");
+```
+
+It's **opt-in** — set `ARTIFACT_ASK_ENABLED=1` (letting sandboxed artifact code trigger LLM calls is
+a cost surface). Under the hood the sandboxed artifact `postMessage`s the shell, which calls the
+**bearer-gated** `POST /api/plugins/artifact/ask` → a *bare* completion via the host SDK
+(`graph.sdk.complete`, protoAgent ≥ the build that ships it). When disabled or unsupported, `ask()`
+rejects with a clear message. The artifact sandbox stays opaque-origin throughout — the bridge is
+the only channel out.
 
 ## Routes
 
 The shell **page** is public at `/plugins/artifact/view` (an iframe page-load can't carry a
-bearer, and the page derives its slug base from `/plugins/…`); its **data** routes
-(`/current`, `/history`) are gated under `/api/plugins/artifact`. Page chrome is the protoLabs
-design-system kit (`/_ds/plugin-kit.{css,js}`), so the panel follows the operator's live theme.
+bearer, and the page derives its slug base from `/plugins/…`); its **data/action** routes
+(`/current`, `/history`, `PUT`/`DELETE` `/artifact/{id}`, `POST /ask`) are gated under
+`/api/plugins/artifact`. Page chrome is the protoLabs design-system kit
+(`/_ds/plugin-kit.{css,js}`), so the panel follows the operator's live theme.
 
 ## Security
 
