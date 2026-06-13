@@ -40,15 +40,24 @@ console view.
 
 ## Configuration
 
-| Env | Default | What |
-|---|---|---|
-| `ARTIFACT_HISTORY` | `20` | How many artifacts to keep (oldest evicted). Bad value → falls back to the default, never crashes load. |
-| `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed) — bounds a long edit session. |
-| `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version; a larger render is rejected with a message (keeps `history.json` bounded). |
-| `ARTIFACT_DIR` | `~/.protoagent/artifact` | Where history is stored (instance-scoped by `PROTOAGENT_INSTANCE`). |
-| `ARTIFACT_ASK_ENABLED` | _(off)_ | Opt-in: let artifacts call back to the agent via `window.protoArtifact.ask()` (below). |
-| `ARTIFACT_ASK_MAX_CHARS` | `4000` | Max prompt length for an `ask()`. |
-| `ARTIFACT_ASK_SYSTEM` | _(none)_ | Optional system instruction wrapping every `ask()`. |
+The operator-facing knobs are **Settings ▸ Plugins ▸ Artifact** fields (no restart) — and an
+environment variable of the same knob overrides the UI for headless / ACP setups. Precedence:
+**env > Settings ▸ Plugins > default**.
+
+| Setting (Settings ▸ Plugins) | Env override | Default | What |
+|---|---|---|---|
+| **Interactive artifacts** | `ARTIFACT_ASK_ENABLED` | _off_ | Let artifacts call back to the agent via `window.protoArtifact.ask()` (below). |
+| **Ask system instruction** | `ARTIFACT_ASK_SYSTEM` | _(none)_ | Optional system prompt wrapping every `ask()`. |
+
+Numeric tuning caps are config-or-env only (no UI field — the settings schema has no `int` type):
+
+| Knob | Env | Default | What |
+|---|---|---|---|
+| history | `ARTIFACT_HISTORY` | `20` | How many artifacts to keep (oldest evicted). |
+| max_versions | `ARTIFACT_MAX_VERSIONS` | `50` | Max versions kept per artifact (oldest edits trimmed). |
+| max_code_kb | `ARTIFACT_MAX_CODE_KB` | `512` | Max source size per version (a larger render is rejected). |
+| ask_max_chars | `ARTIFACT_ASK_MAX_CHARS` | `4000` | Max prompt length for an `ask()`. |
+| — | `ARTIFACT_DIR` | `~/.protoagent/artifact` | Where state is stored (instance-scoped by `PROTOAGENT_INSTANCE`). |
 
 ## Interactive artifacts (calling back to the agent)
 
@@ -61,8 +70,9 @@ tutor, a content generator:
 const reply = await window.protoArtifact.ask("Give the NPC a gruff one-line greeting.");
 ```
 
-It's **opt-in** — set `ARTIFACT_ASK_ENABLED=1` (letting sandboxed artifact code trigger LLM calls is
-a cost surface). Under the hood the sandboxed artifact `postMessage`s the shell, which calls the
+It's **opt-in** — flip **Interactive artifacts** on in **Settings ▸ Plugins ▸ Artifact** (or set
+`ARTIFACT_ASK_ENABLED=1`); letting sandboxed artifact code trigger LLM calls is a cost surface.
+Under the hood the sandboxed artifact `postMessage`s the shell, which calls the
 **bearer-gated** `POST /api/plugins/artifact/ask` → a *bare* completion via the host SDK
 (`graph.sdk.complete`, protoAgent ≥ the build that ships it). When disabled or unsupported, `ask()`
 rejects with a clear message. The artifact sandbox stays opaque-origin throughout — the bridge is
