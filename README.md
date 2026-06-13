@@ -53,7 +53,9 @@ protoAgent's
 [security & trust model](https://github.com/protoLabsAI/protoAgent/blob/main/docs/explanation/security-and-trust.md).
 
 > **Network note.** The `react` and `mermaid` kinds load their libraries from `cdnjs` **inside the
-> sandbox** — so those renders need outbound network and won't work fully offline. The plugin's own
+> sandbox** — so those renders need outbound network and won't work fully offline. Those CDN scripts
+> are pinned with **Subresource Integrity** (`integrity` + `crossorigin`), so a tampered file won't
+> execute (bump the version and the hash together — hashes from `api.cdnjs.com`). The plugin's own
 > server code makes no outbound calls (`capabilities.network: []`). `html` and `svg` are fully
 > self-contained.
 
