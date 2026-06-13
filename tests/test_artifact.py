@@ -25,52 +25,130 @@ def _load(monkeypatch, tmp_path):
     return mod
 
 
-# ── the tool ──────────────────────────────────────────────────────────────────
+# ── the tools (create / update / rewrite / list / delete + versioning) ──────────
+
+
+def _arts(art):
+    return art._read_store()["artifacts"]
 
 
 def test_show_artifact_rejects_unknown_kind(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
     out = art.show_artifact.invoke({"kind": "gif", "code": "x"})
     assert "Unknown artifact kind" in out
-    assert art._read_history() == []  # nothing persisted on rejection
+    assert _arts(art) == []  # nothing persisted on rejection
 
 
 @pytest.mark.parametrize("kind", ["html", "svg", "mermaid", "react"])
-def test_show_artifact_accepts_each_kind_and_persists(monkeypatch, tmp_path, kind):
+def test_show_artifact_creates_a_v1_artifact(monkeypatch, tmp_path, kind):
     art = _load(monkeypatch, tmp_path)
     out = art.show_artifact.invoke({"kind": kind, "code": "<x/>", "title": "T"})
-    assert "Rendered" in out
-    items = art._read_history()
-    assert len(items) == 1
-    assert (
-        items[0]["kind"] == kind
-        and items[0]["title"] == "T"
-        and items[0]["code"] == "<x/>"
-    )
+    assert "Created" in out
+    a = _arts(art)[0]
+    assert a["kind"] == kind and a["title"] == "T"
+    assert len(a["versions"]) == 1 and a["versions"][0]["code"] == "<x/>"
+    assert art._read_store()["current"] == a["id"]
 
 
 def test_kind_is_normalized(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
     art.show_artifact.invoke({"kind": "  HTML ", "code": "x"})
-    assert art._read_history()[0]["kind"] == "html"
+    assert _arts(art)[0]["kind"] == "html"
 
 
-def test_history_prepends_newest_and_rotates_to_max(monkeypatch, tmp_path):
+def test_update_artifact_appends_a_version_via_string_replace(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "<h1>Hello</h1>"})
+    out = art.update_artifact.invoke({"old_string": "Hello", "new_string": "World"})
+    assert "version 2" in out
+    a = _arts(art)[0]
+    assert len(a["versions"]) == 2
+    assert a["versions"][-1]["code"] == "<h1>World</h1>"
+    assert a["versions"][0]["code"] == "<h1>Hello</h1>"  # v1 preserved (no clobber)
+
+
+def test_update_requires_exactly_one_match(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "<p>x</p><p>x</p>"})
+    out = art.update_artifact.invoke({"old_string": "x", "new_string": "y"})
+    assert "matches 2 times" in out
+    assert len(_arts(art)[0]["versions"]) == 1  # not applied
+    miss = art.update_artifact.invoke({"old_string": "zzz", "new_string": "y"})
+    assert "not found" in miss
+    assert len(_arts(art)[0]["versions"]) == 1
+
+
+def test_update_with_no_artifact_is_a_clean_message(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    assert "No artifact" in art.update_artifact.invoke(
+        {"old_string": "a", "new_string": "b"}
+    )
+
+
+def test_rewrite_replaces_whole_source_keeps_kind(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "svg", "code": "<svg>1</svg>", "title": "old"})
+    out = art.rewrite_artifact.invoke({"code": "<svg>2</svg>", "title": "new"})
+    assert "version 2" in out
+    a = _arts(art)[0]
+    assert a["kind"] == "svg" and a["title"] == "new"
+    assert a["versions"][-1]["code"] == "<svg>2</svg>"
+
+
+def test_update_targets_by_id_and_touches_to_front(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "first"})
+    first_id = _arts(art)[0]["id"]
+    art.show_artifact.invoke({"kind": "html", "code": "second"})  # now front
+    art.update_artifact.invoke(
+        {"old_string": "first", "new_string": "FIRST", "artifact_id": first_id}
+    )
+    arts = _arts(art)
+    assert arts[0]["id"] == first_id  # edited artifact moved to front
+    assert arts[0]["versions"][-1]["code"] == "FIRST"
+
+
+def test_list_artifacts_summarizes(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    assert "No artifacts yet" in art.list_artifacts.invoke({})
+    art.show_artifact.invoke({"kind": "mermaid", "code": "graph", "title": "Flow"})
+    out = art.list_artifacts.invoke({})
+    assert "Flow" in out and "[mermaid]" in out and "current" in out
+
+
+def test_delete_artifact_removes_and_repoints_current(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "a"})
+    keep = _arts(art)[0]["id"]
+    art.show_artifact.invoke({"kind": "html", "code": "b"})
+    drop = _arts(art)[0]["id"]
+    out = art.delete_artifact.invoke({"artifact_id": drop})
+    assert "Deleted" in out
+    store = art._read_store()
+    assert [a["id"] for a in store["artifacts"]] == [keep]
+    assert store["current"] == keep  # current re-pointed off the deleted one
+    assert "No artifact" in art.delete_artifact.invoke({"artifact_id": "nope"})
+
+
+def test_versions_rotate_to_max(monkeypatch, tmp_path):
+    monkeypatch.setenv("ARTIFACT_MAX_VERSIONS", "3")
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "v0"})
+    for i in range(1, 5):
+        art.rewrite_artifact.invoke({"code": f"v{i}"})
+    versions = _arts(art)[0]["versions"]
+    assert (
+        len(versions) == 3 and versions[-1]["code"] == "v4"
+    )  # oldest trimmed, newest kept
+
+
+def test_artifacts_rotate_to_max(monkeypatch, tmp_path):
     monkeypatch.setenv("ARTIFACT_HISTORY", "3")
     art = _load(monkeypatch, tmp_path)
     for i in range(5):
         art.show_artifact.invoke({"kind": "svg", "code": f"<n>{i}</n>"})
-    items = art._read_history()
-    assert len(items) == 3  # capped
-    assert items[0]["code"] == "<n>4</n>"  # newest first
-    assert items[-1]["code"] == "<n>2</n>"  # oldest two evicted
-
-
-def test_history_survives_a_reload_same_dir(monkeypatch, tmp_path):
-    art = _load(monkeypatch, tmp_path)
-    art.show_artifact.invoke({"kind": "html", "code": "<p>kept</p>"})
-    art2 = _load(monkeypatch, tmp_path)  # fresh module, same ARTIFACT_DIR
-    assert art2._read_history()[0]["code"] == "<p>kept</p>"
+    arts = _arts(art)
+    assert len(arts) == 3 and arts[0]["versions"][0]["code"] == "<n>4</n>"
 
 
 def test_oversize_artifact_is_rejected_not_persisted(monkeypatch, tmp_path):
@@ -78,7 +156,30 @@ def test_oversize_artifact_is_rejected_not_persisted(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
     out = art.show_artifact.invoke({"kind": "html", "code": "x" * 2048})
     assert "too large" in out.lower()
-    assert art._read_history() == []
+    assert _arts(art) == []
+
+
+def test_state_survives_a_reload_same_dir(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    art.show_artifact.invoke({"kind": "html", "code": "<p>kept</p>"})
+    art.update_artifact.invoke({"old_string": "kept", "new_string": "edited"})
+    art2 = _load(monkeypatch, tmp_path)  # fresh module, same ARTIFACT_DIR
+    a = art2._read_store()["artifacts"][0]
+    assert len(a["versions"]) == 2 and a["versions"][-1]["code"] == "<p>edited</p>"
+
+
+def test_legacy_flat_history_migrates_to_versioned(monkeypatch, tmp_path):
+    art = _load(monkeypatch, tmp_path)
+    # a pre-0.6 file: {"items": [flat artifacts]}
+    art._store_path().write_text(
+        '{"items": [{"id": "old1", "kind": "svg", "code": "<x/>", "title": "Legacy", "ts": 5}]}',
+        encoding="utf-8",
+    )
+    store = art._read_store()
+    a = store["artifacts"][0]
+    assert a["id"] == "old1" and a["title"] == "Legacy"
+    assert len(a["versions"]) == 1 and a["versions"][0]["code"] == "<x/>"
+    assert store["current"] == "old1"
 
 
 def test_bad_history_env_does_not_crash_load(monkeypatch, tmp_path):
@@ -87,21 +188,24 @@ def test_bad_history_env_does_not_crash_load(monkeypatch, tmp_path):
     assert art._MAX_HISTORY == 20  # fell back to the default
 
 
-def test_corrupt_history_file_reads_as_empty(monkeypatch, tmp_path):
+def test_corrupt_store_file_reads_as_empty(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
-    art._history_path().write_text("{not json", encoding="utf-8")
-    assert art._read_history() == []  # tolerated, not a 500
+    art._store_path().write_text("{not json", encoding="utf-8")
+    assert art._read_store() == {
+        "artifacts": [],
+        "current": None,
+    }  # tolerated, not a 500
 
 
-def test_instance_scoping_isolates_history(monkeypatch, tmp_path):
-    # _history_path() reads PROTOAGENT_INSTANCE live, so a scoped instance routes
+def test_instance_scoping_isolates_state(monkeypatch, tmp_path):
+    # _store_path() reads PROTOAGENT_INSTANCE live, so a scoped instance routes
     # to its own subdir — no module reload needed.
     art = _load(monkeypatch, tmp_path)  # host (no instance)
     art.show_artifact.invoke({"kind": "svg", "code": "host"})
-    assert art._read_history()[0]["code"] == "host"
+    assert _arts(art)[0]["versions"][0]["code"] == "host"
     monkeypatch.setenv("PROTOAGENT_INSTANCE", "roxy")
-    assert "roxy" in str(art._history_path())
-    assert art._read_history() == []  # the roxy instance has its own (empty) history
+    assert "roxy" in str(art._store_path())
+    assert _arts(art) == []  # the roxy instance has its own (empty) state
 
 
 # ── the routes (the split + gating contract) ───────────────────────────────────
@@ -132,16 +236,33 @@ def test_data_routes_on_the_gated_prefix(monkeypatch, tmp_path):
 
     art = _load(monkeypatch, tmp_path)
     c = TestClient(_app(art))
-    assert c.get("/api/plugins/artifact/current").json() == {
-        "kind": "",
-        "code": "",
-        "title": "",
-        "ts": 0,
+    assert c.get("/api/plugins/artifact/history").json() == {
+        "artifacts": [],
+        "current": None,
     }
-    assert c.get("/api/plugins/artifact/history").json() == {"items": []}
+    assert c.get("/api/plugins/artifact/current").json()["version"] == 0
     art.show_artifact.invoke({"kind": "svg", "code": "<x/>", "title": "T"})
-    assert c.get("/api/plugins/artifact/current").json()["code"] == "<x/>"
-    assert len(c.get("/api/plugins/artifact/history").json()["items"]) == 1
+    art.update_artifact.invoke({"old_string": "<x/>", "new_string": "<y/>"})
+    cur = c.get("/api/plugins/artifact/current").json()
+    assert (
+        cur["code"] == "<y/>" and cur["version"] == 2
+    )  # latest version of the focused artifact
+    hist = c.get("/api/plugins/artifact/history").json()
+    assert len(hist["artifacts"]) == 1 and len(hist["artifacts"][0]["versions"]) == 2
+    assert hist["current"] == hist["artifacts"][0]["id"]
+
+
+def test_delete_route_removes_the_artifact(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    art = _load(monkeypatch, tmp_path)
+    c = TestClient(_app(art))
+    art.show_artifact.invoke({"kind": "html", "code": "x"})
+    aid = art._read_store()["artifacts"][0]["id"]
+    r = c.delete(f"/api/plugins/artifact/artifact/{aid}")
+    assert r.status_code == 200 and r.json()["deleted"] == aid
+    assert art._read_store()["artifacts"] == []
+    assert c.delete("/api/plugins/artifact/artifact/nope").status_code == 404
 
 
 def test_manifest_view_path_matches_the_served_public_route(monkeypatch, tmp_path):

@@ -1,6 +1,6 @@
 id: artifact
 name: Artifact
-version: 0.5.0
+version: 0.6.0
 # Needs the host to serve the DS plugin-kit at /_ds/ (protoAgent #893, v0.34.0) —
 # the shell page links it for theming + the authed handshake.
 min_protoagent_version: "0.34.0"
@@ -20,7 +20,9 @@ capabilities:
 # /api/plugins/artifact (plugin-view rule 2).
 views:
   - { id: artifact, label: "Artifact", icon: "Sparkles", placement: right, path: "/plugins/artifact/view" }
-# Event contract (ADR 0039) — broadcast when the agent renders an artifact, so the console lights
-# the Artifact rail icon even when the panel is closed.
+# Event contract (ADR 0039) — broadcast when an artifact is created/edited/removed, so the
+# console lights the Artifact rail icon (created/updated) even when the panel is closed.
 emits:
   - artifact.created
+  - artifact.updated
+  - artifact.deleted
