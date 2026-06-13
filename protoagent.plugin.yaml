@@ -1,6 +1,6 @@
 id: artifact
 name: Artifact
-version: 0.4.1
+version: 0.5.0
 # Needs the host to serve the DS plugin-kit at /_ds/ (protoAgent #893, v0.34.0) —
 # the shell page links it for theming + the authed handshake.
 min_protoagent_version: "0.34.0"
@@ -11,8 +11,8 @@ description: >-
   generated code renders in a nested sandbox with no access to the console.
 enabled: true
 capabilities:
-  # The plugin's own server code makes no outbound calls. NB the rendered artifacts
-  # (react/mermaid kinds) load libraries from cdnjs INSIDE the sandbox — see README.
+  # Truly no network: the server makes no outbound calls, and the react/mermaid libs
+  # are VENDORED + served same-origin, so artifacts render fully offline (no cdnjs).
   network: []
   filesystem: scoped     # a small artifact history under the instance data dir
 # The shell page is PUBLIC (an iframe page-load can't carry a bearer, and the page
