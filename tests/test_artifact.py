@@ -39,7 +39,7 @@ def test_show_artifact_rejects_unknown_kind(monkeypatch, tmp_path):
     assert _arts(art) == []  # nothing persisted on rejection
 
 
-@pytest.mark.parametrize("kind", ["html", "svg", "mermaid", "react"])
+@pytest.mark.parametrize("kind", ["html", "svg", "mermaid", "react", "markdown"])
 def test_show_artifact_creates_a_v1_artifact(monkeypatch, tmp_path, kind):
     art = _load(monkeypatch, tmp_path)
     out = art.show_artifact.invoke({"kind": kind, "code": "<x/>", "title": "T"})
@@ -404,10 +404,13 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     # nested artifact frame stays sandboxed with NO same-origin (the isolation model).
     assert 'sandbox="allow-scripts"' in html
     assert "allow-same-origin" not in html
-    # The kit owns the protoagent:init THEME handshake — the page must not hand-roll
-    # it (hex survives ONLY as `var(--pl-color-…, #fallback)` defaults). NB the page
-    # DOES carry a message listener now — the agent-ask bridge, a different concern.
-    assert ":root{" not in html and ":root {" not in html
+    # The kit owns the protoagent:init THEME handshake — the page's OWN chrome must not
+    # hand-roll a :root theme (hex survives only as `var(--pl-color-…, #fallback)` defaults).
+    # NB base() DOES emit a `:root` token-carry, but only into the nested ARTIFACT frame —
+    # that frame has no kit, so it legitimately receives the live token values; scope the
+    # guard to the shell page's own <style> block.
+    page_style = html[html.index("<style>") : html.index("</style>")]
+    assert ":root{" not in page_style and ":root {" not in page_style
     assert "kit.initPluginView" in html  # kit owns theming, not a bespoke listener
     assert "applyTheme" not in html  # the pre-kit hand-rolled theme fn is gone
 
@@ -462,8 +465,8 @@ def test_vendored_files_exist_and_match_the_allowlist(monkeypatch, tmp_path):
     vendor = ROOT / "vendor"
     for name in art._VENDOR_FILES:
         assert (vendor / name).exists(), f"vendor/{name} missing"
-    # no stray files served that aren't on disk, no disk files unlisted.
-    on_disk = {p.name for p in vendor.glob("*.js")}
+    # no stray files served that aren't on disk, no disk files unlisted (UMD .js + ESM .mjs).
+    on_disk = {p.name for p in vendor.iterdir() if p.suffix in (".js", ".mjs")}
     assert on_disk == art._VENDOR_FILES
 
 
@@ -472,13 +475,82 @@ def test_vendor_route_serves_js_and_blocks_traversal(monkeypatch, tmp_path):
 
     art = _load(monkeypatch, tmp_path)
     c = TestClient(_app(art))
-    r = c.get("/plugins/artifact/vendor/react.production.min.js")
-    assert r.status_code == 200
-    assert "javascript" in r.headers["content-type"]
-    assert "immutable" in r.headers.get("cache-control", "")
-    assert (
-        r.headers.get("access-control-allow-origin") == "*"
-    )  # SRI from the opaque sandbox
+    for name in ("react.production.min.js", "d3.mjs", "pl-ui.mjs", "marked.mjs"):
+        r = c.get(f"/plugins/artifact/vendor/{name}")
+        assert r.status_code == 200, name
+        assert "javascript" in r.headers["content-type"]  # ESM must be served as JS
+        assert "immutable" in r.headers.get("cache-control", "")
+        assert (
+            r.headers.get("access-control-allow-origin") == "*"
+        )  # CORS — opaque-sandbox cross-origin fetch (module + SRI)
     # allowlist: an unlisted name / traversal attempt is a clean 404, not a file read.
     assert c.get("/plugins/artifact/vendor/secrets.env").status_code == 404
     assert c.get("/plugins/artifact/vendor/..%2f__init__.py").status_code == 404
+
+
+# ── the new kinds: markdown + the react import map + the DS surface ──────────────
+
+
+def test_react_kind_uses_import_map_and_module_babel(monkeypatch, tmp_path):
+    """react artifacts compile as a MODULE (so `import` works) and ship a curated import
+    map resolving bare specifiers to the same-origin vendored ESM modules."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    assert 'type="importmap"' in html
+    assert (
+        'data-type="module"' in html
+    )  # babel compiles to a module → top-level import ok
+    # bare specifiers → vendored modules (incl. the React shims that share one React instance)
+    for spec, file in (
+        ('"react":', "react.shim.mjs"),
+        ('"react-dom/client":', "react-dom-client.shim.mjs"),
+        ('"@pl/ui":', "pl-ui.mjs"),
+        ('"d3":', "d3.mjs"),
+        ('"chart.js":', "chartjs.mjs"),
+        ('"lucide":', "lucide.mjs"),
+    ):
+        assert spec in html and file in html, spec
+
+
+def test_markdown_kind_renders_via_marked(monkeypatch, tmp_path):
+    """markdown artifacts render via the vendored `marked` ESM into #md; the source is
+    base64'd into the module (no quote/newline/</script> escaping pitfalls)."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    assert 'import { marked } from "marked"' in html
+    assert "marked.mjs" in html and 'id="md"' in html
+    assert "atob(" in html and "btoa(" in html  # base64 round-trip of the source
+    assert "language-mermaid" in html  # ```mermaid fences upgrade to live diagrams
+
+
+def test_ds_kit_injected_into_artifacts(monkeypatch, tmp_path):
+    """html/react/markdown artifacts link the same-origin DS plugin-kit stylesheet so the
+    `.pl-*` classes + `--pl-*` tokens work inside the sandbox and match the console theme."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    assert "/_ds/plugin-kit.css" in html and "function dsLink()" in html
+    # the live theme's key tokens are carried into the nested (no-stylesheet-access) frame.
+    assert "--pl-color-accent:" in html
+
+
+def test_pl_ui_wrapper_module_is_vendored_and_sound():
+    """The authored @pl/ui module imports React via the bare specifier (→ the shim → one
+    shared instance) and wraps the DS classes; the Icon component is lucide-backed."""
+    src = (ROOT / "vendor" / "pl-ui.mjs").read_text()
+    assert 'from "react"' in src and 'from "lucide"' in src
+    for name in ("Button", "Card", "Stat", "Alert", "Icon"):
+        assert f"export function {name}" in src, name
+    assert "pl-btn" in src and "pl-card" in src  # mirrors the DS class contracts
+    # the React shim re-exports the UMD global (single instance).
+    shim = (ROOT / "vendor" / "react.shim.mjs").read_text()
+    assert "window.React" in shim and "export default" in shim
+
+
+def test_no_premature_script_close_in_shell(monkeypatch, tmp_path):
+    """Regression: a literal ``</script>`` anywhere in the shell's module script — even in a
+    JS comment or string — closes that ``<script type=module>`` EARLY (the HTML parser doesn't
+    know JS syntax), breaking boot (empty picker / blank frame / a stray invalid import map).
+    Every script the shell INJECTS into an artifact must escape its close as ``<\\/script>``;
+    only the shell's own two ``<script>`` blocks may carry a real close."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    assert html.count("</script>") == 2, (
+        "exactly the slug-base + main module <script> closes; an extra literal </script> "
+        "(comment/string) would close the module early — escape it as <\\/script>"
+    )

@@ -20,10 +20,55 @@ the user files to wire up themselves — not what they asked for when they want 
 ## Kinds
 
 - `mermaid` — flowcharts, sequence/ER/gantt diagrams. `code` is the Mermaid definition.
+- `markdown` — a Markdown document (notes, a README, a write-up). Rendered with design-system
+  prose styling; GitHub-style tables/lists/code work, and a ` ```mermaid ` fence becomes a live
+  diagram. Reach for this over `html` when you just want **formatted text**.
 - `html` — a full or partial HTML document (with inline `<style>`/`<script>` as needed).
 - `svg` — inline SVG markup (icons, simple charts).
 - `react` — a self-contained component script that renders into `#root`; React, ReactDOM, and
   Babel are provided. Write the component **and** the `ReactDOM.createRoot(...).render(...)` call.
+  React artifacts can also `import` from a curated **offline** set (see below).
+
+## Richer React: charts, icons, and design-system components
+
+`react` artifacts may `import` (ES modules) from this curated, fully-offline set — no network:
+
+- **`@pl/ui`** — protoLabs design-system component wrappers that match the console theme:
+  `Button` · `Card` · `Stat` · `Badge` · `Alert` · `Tag` · `Kbd` · `Input` · `Icon` (a
+  [lucide](https://lucide.dev) icon by `name`, e.g. `<Icon name="rocket" />`).
+- **`chart.js`** — `import { Chart } from 'chart.js'` (controllers pre-registered) for quick
+  bar/line/pie/etc. charts onto a `<canvas>`.
+- **`d3`** — `import * as d3 from 'd3'` for bespoke/data-driven SVG visualisations.
+- **`lucide`** — the raw icon library, if you're not using `@pl/ui`'s `Icon`.
+- **`react`** / **`react-dom/client`** — also importable (`import { createRoot } from
+  'react-dom/client'`); they resolve to the same React the globals use.
+
+```jsx
+import { createRoot } from 'react-dom/client';
+import { Card, Stat, Button, Icon } from '@pl/ui';
+import { Chart } from 'chart.js';
+
+function App() {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    new Chart(ref.current, { type: 'bar',
+      data: { labels: ['A','B','C'], datasets: [{ label: 'n', data: [3,7,5] }] } });
+  }, []);
+  return (
+    <Card>
+      <Stat value="7" label="peak" /> <Icon name="trending-up" />
+      <canvas ref={ref} width={320} height={160} />
+      <Button variant="primary">OK</Button>
+    </Card>
+  );
+}
+createRoot(document.getElementById('root')).render(<App />);
+```
+
+You can also style plain elements with the design system's `.pl-*` classes (e.g.
+`className="pl-btn pl-btn--primary"`) and `--pl-*` CSS tokens in **any** `html`/`react`/`markdown`
+artifact — they're injected so artifacts match the console's live theme. Only these libraries are
+available; for anything else, write the code inline (the sandbox has no other network access).
 
 ## Editing an artifact (don't re-create it)
 
