@@ -1,9 +1,11 @@
 # artifact-plugin
 
 A **protoAgent plugin** that gives the agent generative UI on demand. The agent calls
-`show_artifact(kind, code)` to render **HTML / SVG / Mermaid / React** into the console's Artifact
-panel — rendered in a **sandboxed iframe** (`sandbox="allow-scripts"`, no same-origin), the same
-isolation model as Claude Artifacts / Open WebUI. Generated code runs, but can't touch the console.
+`show_artifact(kind, code)` to render **HTML / Markdown / SVG / Mermaid / React** into the console's
+Artifact panel — rendered in a **sandboxed iframe** (`sandbox="allow-scripts"`, no same-origin), the
+same isolation model as Claude Artifacts / Open WebUI. Generated code runs, but can't touch the
+console. React artifacts can `import` a curated **offline** set — charts, icons, and the protoLabs
+**design-system** components.
 
 It's also the **reference external plugin**: pure Python + a self-served iframe page + a bundled
 skill — no host build, no federation. Installable from this git URL.
@@ -24,7 +26,9 @@ console view.
 
 - **Tools** — an artifact is a **version chain** (the Claude "update vs rewrite" model), so editing
   iterates the same artifact instead of flooding the panel with near-duplicates:
-  - `show_artifact(kind, code, title)` — **create** (`kind` ∈ `html` · `svg` · `mermaid` · `react`).
+  - `show_artifact(kind, code, title)` — **create** (`kind` ∈ `html` · `markdown` · `svg` · `mermaid`
+    · `react`). `markdown` renders with design-system prose styling (` ```mermaid ` fences become
+    live diagrams); `react` can `import` the curated libraries below.
   - `update_artifact(old_string, new_string, artifact_id?)` — **targeted edit** (string-replace,
     must match once) → new version. The fast path for small changes.
   - `rewrite_artifact(code, title?, artifact_id?)` — **full replace** → new version.
@@ -37,6 +41,25 @@ console view.
   the bus so the console lights the Artifact rail icon even when the panel is closed.
 - **Skill** `rendering-artifacts` — teaches render-don't-write-files and the edit-don't-recreate
   workflow.
+
+## Curated React imports + the design system
+
+`react` artifacts can `import` from a curated, **fully-offline** set (resolved by an
+[import map](https://developer.mozilla.org/en-US/docs/Web/HTML/Element/script/type/importmap) to the
+same-origin `vendor/` modules — no network):
+
+| Specifier | What |
+|---|---|
+| `@pl/ui` | protoLabs **design-system** wrappers that match the console theme: `Button` · `Card` · `Stat` · `Badge` · `Alert` · `Tag` · `Kbd` · `Input` · `Icon` (lucide by `name`). |
+| `chart.js` | `import { Chart } from 'chart.js'` (controllers pre-registered) — quick charts onto a `<canvas>`. |
+| `d3` | `import * as d3 from 'd3'` — bespoke data-driven SVG. |
+| `lucide` | the raw icon library (if not using `@pl/ui`'s `Icon`). |
+| `react`, `react-dom/client` | resolve to the same React the UMD globals use (one shared instance). |
+
+The design system ships only `.tsx` source (no browser ESM build), so `@pl/ui` is a small set of
+**authored** wrappers over the DS `.pl-*` classes. Those classes and the `--pl-*` tokens are injected
+into every `html` / `react` / `markdown` artifact (via the host-served `/_ds/plugin-kit.css`), so even
+plain elements (`className="pl-btn pl-btn--primary"`) follow the live theme.
 
 ## Configuration
 
@@ -91,13 +114,18 @@ reach the console, its cookies, or its APIs (the Claude Artifacts / Open WebUI m
 protoAgent's
 [security & trust model](https://github.com/protoLabsAI/protoAgent/blob/main/docs/explanation/security-and-trust.md).
 
-> **Offline / no network.** The `react` and `mermaid` libraries (React, ReactDOM, Babel, Mermaid)
-> are **vendored** under `vendor/` and served same-origin from `/plugins/artifact/vendor/…`, so every
-> artifact kind renders **fully offline** — no `cdnjs`, no outbound network at all
-> (`capabilities.network: []` is literally true). The scripts are still pinned with **Subresource
-> Integrity** (`integrity` + `crossorigin="anonymous"` — required because the sandbox is an opaque
-> origin, so the load is cross-origin); a tampered served file won't execute. To bump a lib, replace
-> the file in `vendor/`, recompute its `sha512` SRI, and update the `LIB` map in the shell page.
+> **Offline / no network.** Everything is **vendored** under `vendor/` and served same-origin from
+> `/plugins/artifact/vendor/…`, so every artifact kind renders **fully offline** — no `cdnjs`, no
+> outbound network at all (`capabilities.network: []` is literally true):
+> - **UMD `<script>` libs** — React, ReactDOM, Babel, Mermaid (`*.min.js`). Pinned with **Subresource
+>   Integrity** (`integrity` + `crossorigin="anonymous"` — required because the sandbox is an opaque
+>   origin, so the load is cross-origin); a tampered served file won't execute. To bump one, replace
+>   the file, recompute its `sha512`, and update the `LIB` map in the shell page.
+> - **ESM modules** (the `react` import map) — `d3.mjs`, `chartjs.mjs`, `lucide.mjs`, `marked.mjs`
+>   (esbuild-bundled, self-contained) plus the authored `pl-ui.mjs` + `react*.shim.mjs`. These are
+>   same-origin and **install-pinned** (the `plugins.lock` commit sha pins the exact bytes) rather
+>   than SRI-pinned — import-map `integrity` isn't yet broadly supported. To bump a curated lib,
+>   re-bundle it into `vendor/` (`esbuild --bundle --format=esm --minify`).
 
 ## Development
 
