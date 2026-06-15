@@ -412,6 +412,20 @@ def test_shell_page_is_four_rules_compliant(monkeypatch, tmp_path):
     assert "applyTheme" not in html  # the pre-kit hand-rolled theme fn is gone
 
 
+def test_edit_overlay_does_not_teardown_the_frame(monkeypatch, tmp_path):
+    """Regression: toggling the in-panel editor must NOT hide + re-srcdoc the artifact
+    frame. The editor is an opaque absolute overlay, so the frame stays laid out; the old
+    code re-rendered on exit, which raced the reflow and made mermaid measure text at 0
+    size (`transform: translate(undefined, NaN)` → a black panel the `lastRendered` cache
+    never repainted). Keep the frame visible/sized the whole time."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    # the editor overlays the stage, so editing never needs to tear the frame down.
+    assert "#editor{position:absolute;inset:0" in html
+    # exitEdit must not force a re-render of the (un-changed) frame on exit — the
+    # `…display="none"; lastRendered=""; render()` signature that caused the black panel.
+    assert 'lastRendered=""; render()' not in html
+
+
 def test_ask_bridge_is_wired(monkeypatch, tmp_path):
     """The window.protoArtifact.ask shim is injected into artifacts and the shell
     relays it to the gated /ask endpoint (the agent-callback bridge)."""
