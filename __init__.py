@@ -743,13 +743,20 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
 
   // In-panel code editor — edit the SELECTED version's source and save it as a NEW
   // version (by:"user"), so direct editing never clobbers the agent's versions.
+  // The editor is an OPAQUE overlay (#editor is position:absolute, inset:0) that sits
+  // ABOVE the artifact frame — so we never hide or re-srcdoc the frame to edit. Tearing
+  // it down and re-rendering on EXIT raced the display:block reflow: mermaid then
+  // measured its text at 0 size and emitted `transform: translate(undefined, NaN)`,
+  // leaving a blank (black) panel that the version-keyed `lastRendered` cache never
+  // repainted (→ "went black, needed a page refresh"). Keeping the frame laid out the
+  // whole time means any re-render only happens while it's visible and sized.
   function enterEdit(){
     var a=selArt(); if(!a) return; var vi=verIdx(a);
     $code.value=a.versions[vi].code; $estat.textContent="";
     editing=true; $edit.textContent="Editing"; $editor.style.display="flex";
-    $frame.style.display="none"; $empty.style.display="none"; $code.focus();
+    $empty.style.display="none"; $code.focus();
   }
-  function exitEdit(){ editing=false; $edit.textContent="Edit"; $editor.style.display="none"; lastRendered=""; render(); }
+  function exitEdit(){ editing=false; $edit.textContent="Edit"; $editor.style.display="none"; render(); }
   $edit.addEventListener("click", function(){ editing ? exitEdit() : enterEdit(); });
   $cancel.addEventListener("click", exitEdit);
   $run.addEventListener("click", async function(){
