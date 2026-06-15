@@ -1,6 +1,6 @@
 """Artifact plugin (ADR 0038) — generative UI on demand.
 
-The agent calls ``show_artifact(kind, code)`` to render HTML / SVG / Mermaid / React into the
+The agent calls ``show_artifact(kind, code)`` to render HTML / SVG / Mermaid / Markdown / React into the
 console's Artifact panel, then iterates it with ``update_artifact`` (a targeted string-replace
 edit) or ``rewrite_artifact`` (a full replacement) — the Claude "update vs rewrite" model, so an
 artifact is a VERSION CHAIN you can step back through, not a flood of near-duplicates.
@@ -28,16 +28,30 @@ from langchain_core.tools import tool
 
 log = logging.getLogger("protoagent.plugins.artifact")
 
-_KINDS = {"html", "svg", "mermaid", "react"}
+_KINDS = {"html", "svg", "mermaid", "react", "markdown"}
 
-# Vendored JS libs served same-origin so react/mermaid artifacts work offline.
-# Allowlist (no path traversal) — must match the files in vendor/ and the LIB map
-# in the shell page. SRI in the shell pins their exact bytes.
+# Vendored assets served same-origin so artifacts render fully offline (no cdnjs).
+# Allowlist (no path traversal) — must match the files in vendor/. Two groups:
+#  • UMD libs loaded via <script> + SRI (react/react-dom/babel/mermaid), pinned in the
+#    shell's LIB map.
+#  • ESM modules resolved by the `react` import map — curated offline libs, tiny React
+#    shims (re-export the UMD globals → one shared React instance), and the authored
+#    @pl/ui DS wrappers; same-origin + install-pinned (plugins.lock sha), not SRI.
 _VENDOR_FILES = {
+    # UMD (SRI-pinned in the shell's LIB map)
     "mermaid.min.js",
     "react.production.min.js",
     "react-dom.production.min.js",
     "babel.min.js",
+    # ESM modules (the `react` import map): curated libs …
+    "d3.mjs",
+    "chartjs.mjs",
+    "lucide.mjs",
+    "marked.mjs",
+    # … React shims + authored design-system wrappers
+    "react.shim.mjs",
+    "react-dom-client.shim.mjs",
+    "pl-ui.mjs",
 }
 
 
@@ -234,9 +248,13 @@ def show_artifact(kind: str, code: str, title: str = "") -> str:
     """CREATE a new generative-UI artifact in the console's Artifact panel.
 
     ``kind`` is one of: "html" (a full or partial HTML document), "svg" (inline SVG markup),
-    "mermaid" (a Mermaid diagram definition), or "react" (a self-contained React component script
-    that renders into ``#root``; React, ReactDOM and Babel are provided). ``code`` is the source;
-    ``title`` is an optional label. Runs sandboxed — it can't access the console.
+    "mermaid" (a Mermaid diagram definition), "markdown" (a Markdown document — rendered with
+    design-system prose styling; ```mermaid fences become live diagrams), or "react" (a
+    self-contained React component script that renders into ``#root``; React, ReactDOM and Babel
+    are provided, and it can ``import`` from a curated offline set — ``d3``, ``chart.js``,
+    ``lucide``, and ``@pl/ui`` design-system components like ``Button``/``Card``/``Stat``/
+    ``Icon``). ``code`` is the source; ``title`` is an optional label. Runs sandboxed — it can't
+    access the console.
 
     To EDIT what you just made, use ``update_artifact`` (a small targeted change) or
     ``rewrite_artifact`` (a full replacement) — they iterate the SAME artifact as a new
@@ -638,11 +656,20 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     + 'parent.postMessage({type:"protoArtifact:ask",id:id,prompt:String(prompt)},"*");'
     + 'setTimeout(function(){if(w[id]){delete w[id];rej(new Error("ask timed out"));}},60000);});}};'
     + '})();<\/script>';
+  // Design-system surface: link the same-origin DS plugin-kit stylesheet (host-served at
+  // /_ds/, min_protoagent_version 0.34.0) into html/react/markdown artifacts so they can use
+  // the `.pl-*` component classes + `--pl-*` tokens and match the console. A cross-origin
+  // <link> applies without CORS (only CSSOM access is gated), so the opaque sandbox can load it.
+  function dsLink(){ return '<link rel="stylesheet" href="' + ORIGIN + '/_ds/plugin-kit.css">'; }
   function base(){
     var cs = getComputedStyle(document.documentElement);
-    var bg = (cs.getPropertyValue("--pl-color-bg") || "#0a0a0c").trim();
-    var fg = (cs.getPropertyValue("--pl-color-fg") || "#ededed").trim();
-    return '<style>html,body{margin:0;background:' + bg + ';color:' + fg + '}</style>' + SHIM;
+    function tok(n,d){ return (cs.getPropertyValue(n) || d).trim(); }
+    var bg=tok("--pl-color-bg","#0a0a0c"), fg=tok("--pl-color-fg","#ededed"),
+        accent=tok("--pl-color-accent","#9b87f2"), border=tok("--pl-color-border","rgba(255,255,255,.08)");
+    // Carry the live theme's key tokens into the nested frame (plugin-kit.css ships only the
+    // DEFAULT palette); inline bg = no white flash; SHIM = the protoArtifact.ask bridge.
+    return '<style>:root{--pl-color-bg:'+bg+';--pl-color-fg:'+fg+';--pl-color-accent:'+accent+';--pl-color-border:'+border+'}'
+      + 'html,body{margin:0;background:'+bg+';color:'+fg+'}</style>' + SHIM;
   }
   // Artifact libs are VENDORED + served same-origin (/plugins/artifact/vendor/…), so
   // react/mermaid renders work fully OFFLINE — no cdnjs dependency. Still pinned with
@@ -667,16 +694,64 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   // Access-Control-Allow-Origin:* to satisfy the CORS fetch.
   function cdn(name){ var c = LIB[name];
     return '<script crossorigin="anonymous" integrity="' + c[1] + '" src="' + ORIGIN + '/plugins/artifact/vendor/' + c[0] + '"><\/script>'; }
+  // Curated ESM import map for `react` artifacts (offline-vendored, served same-origin with
+  // CORS). Bare specifiers resolve to the vendored modules: react/react-dom via tiny shims that
+  // re-export the UMD globals (so the artifact, the @pl/ui wrappers, and any lib share ONE
+  // React instance), plus d3 / chart.js / lucide and the authored @pl/ui DS wrappers.
+  var V = ORIGIN + "/plugins/artifact/vendor/";
+  var IMPORTMAP = JSON.stringify({ imports: {
+    "react": V + "react.shim.mjs",
+    "react-dom": V + "react-dom-client.shim.mjs",
+    "react-dom/client": V + "react-dom-client.shim.mjs",
+    "@pl/ui": V + "pl-ui.mjs",
+    "d3": V + "d3.mjs",
+    "chart.js": V + "chartjs.mjs",
+    "chart.js/auto": V + "chartjs.mjs",
+    "lucide": V + "lucide.mjs"
+  }});
+  // Prose styling for markdown, keyed to --pl-* tokens (the DS link supplies component classes).
+  var MD_CSS = '#md{max-width:50rem;margin:0 auto;padding:20px;line-height:1.6}'
+    + '#md h1,#md h2,#md h3,#md h4{line-height:1.25;margin:1.4em 0 .5em}#md h1{font-size:1.7em}#md h2{font-size:1.35em}#md h3{font-size:1.12em}'
+    + '#md a{color:var(--pl-color-accent,#9b87f2)}'
+    + '#md code{font-family:var(--pl-font-mono,ui-monospace,Menlo,monospace);font-size:.9em;background:rgba(127,127,127,.16);padding:.15em .35em;border-radius:4px}'
+    + '#md pre{background:rgba(127,127,127,.12);padding:12px;border-radius:6px;overflow:auto}#md pre code{background:none;padding:0}'
+    + '#md table{border-collapse:collapse}#md th,#md td{border:1px solid var(--pl-color-border,rgba(255,255,255,.14));padding:6px 10px}'
+    + '#md blockquote{margin:1em 0;padding-left:1em;border-left:3px solid var(--pl-color-border,rgba(255,255,255,.2));color:var(--pl-color-fg-muted,#9aa0aa)}'
+    + '#md img{max-width:100%}#md .mermaid{background:none;border:0;padding:0}';
+
   function srcdoc(kind, code) {
-    if (kind === "html") return base() + code;
+    if (kind === "html") return dsLink() + base() + code;
     if (kind === "svg") return '<!doctype html>' + base() + '<body style="display:grid;place-items:center;min-height:100vh">' + code + '</body>';
     if (kind === "mermaid") return '<!doctype html>' + base() + '<body><pre class="mermaid">' + esc(code) + '</pre>' +
       cdn("mermaid") +
       '<script>mermaid.initialize({startOnLoad:false,theme:"dark"});mermaid.run();<\/script></body>';
-    if (kind === "react") return '<!doctype html>' + base() + '<body><div id="root"></div>' +
+    if (kind === "markdown") return mdDoc(code);
+    // `react`: import map + UMD react/react-dom/babel, compiled as a MODULE so `import` works
+    // (no-import artifacts still run — they use the UMD React/ReactDOM globals as before).
+    if (kind === "react") return '<!doctype html>' + dsLink() + base() + '<body><div id="root"></div>' +
+      '<script type="importmap">' + IMPORTMAP + '<\/script>' +
       cdn("react") + cdn("reactDom") + cdn("babel") +
-      '<script type="text/babel" data-presets="react">' + code + '<\/script></body>';
+      '<script type="text/babel" data-type="module" data-presets="react">' + code + '<\/script></body>';
     return '<!doctype html>' + base() + '<body style="font-family:sans-serif;padding:16px">unsupported artifact kind</body>';
+  }
+  // markdown → HTML via the vendored `marked` ESM. The source is base64'd into the module
+  // (unicode-safe; sidesteps quote / newline / closing-tag escaping pitfalls). A fenced
+  // mermaid block also pulls mermaid in and upgrades those code blocks to live diagrams.
+  // DS classes/tokens via dsLink + MD_CSS.
+  function mdDoc(code){
+    var b64 = btoa(unescape(encodeURIComponent(code)));
+    var hasMermaid = code.indexOf("```mermaid") >= 0;
+    var mmRun = hasMermaid
+      ? 'document.querySelectorAll("#md pre>code.language-mermaid").forEach(function(c){var d=document.createElement("pre");d.className="mermaid";d.textContent=c.textContent;c.parentNode.replaceWith(d);});'
+        + 'if(window.mermaid){mermaid.initialize({startOnLoad:false,theme:"dark"});mermaid.run();}'
+      : "";
+    return '<!doctype html>' + dsLink() + base() + '<style>' + MD_CSS + '</style>' +
+      '<body><div id="md" class="pl-prose"></div>' +
+      '<script type="importmap">{"imports":{"marked":"' + V + 'marked.mjs"}}<\/script>' +
+      (hasMermaid ? cdn("mermaid") : "") +
+      '<script type="module">import { marked } from "marked";' +
+      'document.getElementById("md").innerHTML = marked.parse(decodeURIComponent(escape(atob("' + b64 + '"))));' +
+      mmRun + '<\/script></body>';
   }
   var $art=document.getElementById("art"), $vprev=document.getElementById("vprev"),
       $vnext=document.getElementById("vnext"), $vlabel=document.getElementById("vlabel"),

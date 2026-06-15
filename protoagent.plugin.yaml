@@ -1,14 +1,16 @@
 id: artifact
 name: Artifact
-version: 0.10.1
+version: 0.11.0
 # Needs the host to serve the DS plugin-kit at /_ds/ (protoAgent #893, v0.34.0) —
-# the shell page links it for theming + the authed handshake.
+# the shell page links it for theming + the authed handshake, and artifacts inject it
+# so `.pl-*` design-system classes work inside the sandbox.
 min_protoagent_version: "0.34.0"
 description: >-
-  A generative-UI surface (ADR 0038): the agent renders HTML / charts / Mermaid diagrams /
-  SVG on demand into a sandboxed iframe — the way Claude Artifacts and Open
-  WebUI do it. The shell page is served by this plugin and iframed; the agent's
-  generated code renders in a nested sandbox with no access to the console.
+  A generative-UI surface (ADR 0038): the agent renders HTML / Markdown / charts / Mermaid
+  diagrams / SVG / React on demand into a sandboxed iframe — the way Claude Artifacts and Open
+  WebUI do it. React artifacts can import a curated offline set (d3, chart.js, lucide) and the
+  protoLabs design-system @pl/ui wrappers. The shell page is served by this plugin and iframed;
+  the agent's generated code renders in a nested sandbox with no access to the console.
 enabled: true
 capabilities:
   # Truly no network: the server makes no outbound calls, and the react/mermaid libs
