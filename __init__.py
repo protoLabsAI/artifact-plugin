@@ -661,6 +661,19 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
   // the `.pl-*` component classes + `--pl-*` tokens and match the console. A cross-origin
   // <link> applies without CORS (only CSSOM access is gated), so the opaque sandbox can load it.
   function dsLink(){ return '<link rel="stylesheet" href="' + ORIGIN + '/_ds/plugin-kit.css">'; }
+  // Error surfacing (injected into EVERY artifact via base()): register global error /
+  // unhandledrejection handlers that lazily drop a fixed bottom overlay into the frame — so a
+  // broken artifact shows WHY instead of a silent blank. Exposes window.__artErr(msg) for the
+  // harness's own guards (e.g. the React no-mount check) to reuse.
+  var ERRBOOT = '<script>(function(){'
+    + 'function show(m){var d=document.getElementById("__arterr");'
+    + 'if(!d){d=document.createElement("div");d.id="__arterr";'
+    + 'd.style.cssText="position:fixed;left:0;right:0;bottom:0;max-height:60%;overflow:auto;margin:0;padding:10px 13px;background:#2a0f12;color:#ffb4b4;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;border-top:2px solid #f87171;z-index:2147483647";'
+    + '(document.body||document.documentElement).appendChild(d);}d.textContent=String(m);}'
+    + 'window.__artErr=show;'
+    + 'addEventListener("error",function(e){show("⚠ "+(e.message||(e.error&&e.error.message)||"Script error")+(e.lineno?" (line "+e.lineno+")":""));},true);'
+    + 'addEventListener("unhandledrejection",function(e){show("⚠ "+((e.reason&&e.reason.message)||e.reason));});'
+    + '})();<\/script>';
   function base(){
     var cs = getComputedStyle(document.documentElement);
     function tok(n,d){ return (cs.getPropertyValue(n) || d).trim(); }
@@ -669,7 +682,7 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     // Carry the live theme's key tokens into the nested frame (plugin-kit.css ships only the
     // DEFAULT palette); inline bg = no white flash; SHIM = the protoArtifact.ask bridge.
     return '<style>:root{--pl-color-bg:'+bg+';--pl-color-fg:'+fg+';--pl-color-accent:'+accent+';--pl-color-border:'+border+'}'
-      + 'html,body{margin:0;background:'+bg+';color:'+fg+'}</style>' + SHIM;
+      + 'html,body{margin:0;background:'+bg+';color:'+fg+'}</style>' + SHIM + ERRBOOT;
   }
   // Artifact libs are VENDORED + served same-origin (/plugins/artifact/vendor/…), so
   // react/mermaid renders work fully OFFLINE — no cdnjs dependency. Still pinned with
@@ -731,7 +744,15 @@ _SHELL_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
     if (kind === "react") return '<!doctype html>' + dsLink() + base() + '<body><div id="root"></div>' +
       '<script type="importmap">' + IMPORTMAP + '<\/script>' +
       cdn("react") + cdn("reactDom") + cdn("babel") +
-      '<script type="text/babel" data-type="module" data-presets="react">' + code + '<\/script></body>';
+      '<script type="text/babel" data-type="module" data-presets="react">' + code + '<\/script>' +
+      // No-mount guard: a babel module that defines a component but never calls render() leaves
+      // #root empty with NO thrown error — the silent blank that reads as "stuck". Poll briefly;
+      // if #root never gets a child and nothing else errored, surface an actionable message.
+      '<script>(function(){var n=0,t=setInterval(function(){var r=document.getElementById("root");'
+      + 'if(r&&r.firstChild){clearInterval(t);return;}'
+      + 'if(++n>=30){clearInterval(t);if(window.__artErr&&!document.getElementById("__arterr"))'
+      + 'window.__artErr("Nothing rendered into #root — a React artifact must MOUNT itself, e.g. createRoot(document.getElementById(\'root\')).render(<App/>). Defining a component is not enough; you must call render().");'
+      + '}},100);})();<\/script></body>';
     return '<!doctype html>' + base() + '<body style="font-family:sans-serif;padding:16px">unsupported artifact kind</body>';
   }
   // markdown → HTML via the vendored `marked` ESM. The source is base64'd into the module
