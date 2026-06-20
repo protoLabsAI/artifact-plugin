@@ -511,6 +511,22 @@ def test_react_kind_uses_import_map_and_module_babel(monkeypatch, tmp_path):
         assert spec in html and file in html, spec
 
 
+def test_harness_guards_against_silent_blank(monkeypatch, tmp_path):
+    """Hardening: the harness surfaces errors (global handlers + a lazy `__arterr` overlay via
+    base(), so it covers every kind) and, for react, flags a component that's DEFINED but never
+    mounted into #root — so a broken artifact shows WHY instead of a silent blank (the
+    'looks stuck' failure mode)."""
+    html = _load(monkeypatch, tmp_path)._SHELL_HTML
+    # Universal error surfacing (base() → every artifact frame).
+    assert "window.__artErr" in html
+    assert 'addEventListener("error"' in html
+    assert 'addEventListener("unhandledrejection"' in html
+    assert '"__arterr"' in html  # the overlay element id
+    # React no-mount guard: actionable message instead of a blank #root.
+    assert "must MOUNT itself" in html
+    assert "Nothing rendered into #root" in html
+
+
 def test_markdown_kind_renders_via_marked(monkeypatch, tmp_path):
     """markdown artifacts render via the vendored `marked` ESM into #md; the source is
     base64'd into the module (no quote/newline/</script> escaping pitfalls)."""
