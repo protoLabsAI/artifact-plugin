@@ -116,6 +116,31 @@ def test_list_artifacts_summarizes(monkeypatch, tmp_path):
     assert "Flow" in out and "[mermaid]" in out and "current" in out
 
 
+def test_get_artifact_returns_current_source(monkeypatch, tmp_path):
+    """get_artifact returns the actual code (not just metadata) so an agent can take over
+    an artifact it didn't create. Defaults to current; targets another by id; clean miss."""
+    art = _load(monkeypatch, tmp_path)
+    assert "No artifact to read" in art.get_artifact.invoke({})  # none yet
+
+    art.show_artifact.invoke({"kind": "html", "code": "<h1>First</h1>", "title": "One"})
+    first = _arts(art)[0]["id"]
+    art.show_artifact.invoke({"kind": "svg", "code": "<svg>2</svg>", "title": "Two"})
+
+    # Default → the current (most recent) artifact's source.
+    cur = art.get_artifact.invoke({})
+    assert "<svg>2</svg>" in cur and "[svg]" in cur and "Two" in cur
+
+    # Targeted → the older one's source, even though it isn't current (the takeover path).
+    older = art.get_artifact.invoke({"artifact_id": first})
+    assert "<h1>First</h1>" in older and "One" in older
+
+    # After an edit, returns the latest version's code.
+    art.update_artifact.invoke(
+        {"old_string": "2", "new_string": "9", "artifact_id": _arts(art)[0]["id"]}
+    )
+    assert "<svg>9</svg>" in art.get_artifact.invoke({})
+
+
 def test_delete_artifact_removes_and_repoints_current(monkeypatch, tmp_path):
     art = _load(monkeypatch, tmp_path)
     art.show_artifact.invoke({"kind": "html", "code": "a"})

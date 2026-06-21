@@ -4,7 +4,8 @@ The agent calls ``show_artifact(kind, code)`` to render HTML / SVG / Mermaid / M
 console's Artifact panel, then iterates it with ``update_artifact`` (a targeted string-replace
 edit) or ``rewrite_artifact`` (a full replacement) — the Claude "update vs rewrite" model, so an
 artifact is a VERSION CHAIN you can step back through, not a flood of near-duplicates.
-``list_artifacts`` / ``delete_artifact`` manage them. The panel is a plugin-served shell page
+``list_artifacts`` / ``get_artifact`` (read the current source — how you take over an artifact you
+didn't author) / ``delete_artifact`` manage them. The panel is a plugin-served shell page
 (iframed by the console, ADR 0026) that renders the generated code in a **nested sandboxed
 iframe** (``sandbox="allow-scripts"``, no same-origin) — the Claude Artifacts / Open WebUI
 isolation model: generated code runs, but can't touch the console, its cookies, or its APIs.
@@ -309,7 +310,7 @@ def update_artifact(old_string: str, new_string: str, artifact_id: str = "") -> 
     if n == 0:
         return (
             "old_string not found in the current source — it must match exactly (whitespace "
-            "included). Check the source via list_artifacts or the panel."
+            "included). Read the current source with get_artifact, then craft an exact old_string."
         )
     if n > 1:
         return (
@@ -370,6 +371,26 @@ def list_artifacts() -> str:
             f"{a['id']}  [{a['kind']}]  {a['title'] or '(untitled)'}  · v{len(a['versions'])}{cur}"
         )
     return "Artifacts (newest first):\n" + "\n".join(lines)
+
+
+@tool
+def get_artifact(artifact_id: str = "") -> str:
+    """Return the CURRENT source code of an artifact (with its kind, title and version).
+
+    This is how you TAKE OVER an artifact you didn't create — e.g. one from an earlier
+    session or another agent: read the source here, then iterate it with ``update_artifact``
+    (craft an exact ``old_string`` from what you read) or ``rewrite_artifact``. ``list_artifacts``
+    only shows metadata; this returns the actual code. Defaults to the current artifact; pass
+    ``artifact_id`` (see ``list_artifacts``) to target another. Read-only.
+    """
+    store = _read_store()
+    art = _find(store, artifact_id or store["current"])
+    if art is None:
+        return "No artifact to read. Use list_artifacts to see the ids, or show_artifact to create one."
+    code = art["versions"][-1]["code"]
+    title = art["title"] or "(untitled)"
+    v = len(art["versions"])
+    return f"Artifact {art['id']}  [{art['kind']}]  {title}  · v{v} — current source:\n\n{code}"
 
 
 @tool
@@ -550,6 +571,7 @@ def register(registry) -> None:
         update_artifact,
         rewrite_artifact,
         list_artifacts,
+        get_artifact,
         delete_artifact,
     ):
         registry.register_tool(t)
