@@ -259,8 +259,14 @@ def show_artifact(kind: str, code: str, title: str = "") -> str:
 
     To EDIT what you just made, use ``update_artifact`` (a small targeted change) or
     ``rewrite_artifact`` (a full replacement) — they iterate the SAME artifact as a new
-    version instead of cluttering the panel with near-duplicates. Prefer this tool over
-    writing files when the user just wants to SEE something rendered. Returns the artifact id.
+    version instead of cluttering the panel with near-duplicates.
+
+    Use this for free-form or custom-rendered visuals — a chart, a Mermaid diagram, bespoke
+    HTML/React/SVG (it runs sandboxed, heavier). For plain STRUCTURED DATA — a table, a
+    metrics block, a step/plan list — prefer ``show_component`` instead (it renders inline in
+    the chat, data-only, no sandbox, lighter). Rule of thumb: a generated VISUAL → this tool;
+    a data SHAPE → a component. Prefer either over writing files when the user just wants to
+    SEE something rendered. Returns the artifact id.
     """
     k = (kind or "").strip().lower()
     if k not in _KINDS:
