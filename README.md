@@ -1,5 +1,11 @@
 # artifact-plugin
 
+> [!IMPORTANT]
+> **Moved into protoAgent core.** As of [protoAgent #1443](https://github.com/protoLabsAI/protoAgent/pull/1454)
+> the artifact plugin is **bundled in-tree** at [`plugins/artifact/`](https://github.com/protoLabsAI/protoAgent/tree/main/plugins/artifact)
+> and ships with the agent (opt in via `plugins.enabled: [artifact]`). **That copy is now canonical** —
+> this standalone repo is **archived** and no longer maintained. File issues and PRs against protoAgent.
+
 A **protoAgent plugin** that gives the agent generative UI on demand. The agent calls
 `show_artifact(kind, code)` to render **HTML / Markdown / SVG / Mermaid / React** into the console's
 Artifact panel — rendered in a **sandboxed iframe** (`sandbox="allow-scripts"`, no same-origin), the
